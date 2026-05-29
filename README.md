@@ -77,7 +77,7 @@ bq mk --table \
 
 bq mk --table \
   pollution_data.dim_polluants \
-  code_poll:INTEGER,nom_poll:STRING,unite:STRING,id_poll_ue:INTEGER
+  code_poll:INTEGER,notation:STRING,nom_poll:STRING,unite:STRING,id_poll_ue:INTEGER
 
 bq mk --table \
   pollution_data.fait_mesures \
