@@ -8,9 +8,10 @@ def transformer_polluants():
 
     df = pd.read_csv(dossier_entree / "polluants.csv")
 
-    df_polluants = df[["codeue", "code", "libelle_fr", "code_unite_concentration"]].drop_duplicates()
+    df_polluants = df[["codeue", "code", "notation", "libelle_fr", "code_unite_concentration"]].drop_duplicates()
     df_polluants = df_polluants.rename(columns={
         "codeue": "id_poll_ue",
+        "notation":"notation",
         "code": "code_poll",
         "libelle_fr": "nom_poll",
         "code_unite_concentration": "unite"
