@@ -78,6 +78,10 @@ bq mk --table \
 bq mk --table \
   pollution_data.dim_polluants \
   code_poll:INTEGER,nom_poll:STRING,unite:STRING,id_poll_ue:INTEGER
+
+bq mk --table \
+  pollution_data.fait_mesures \
+  id_mesure:INTEGER,code_station:STRING,id_poll_ue:INTEGER,insee_com:INTEGER,date_mesure:TIMESTAMP,valeur:FLOAT,validite:BOOLEAN
 ```
 
 > Remarque : `dim_polluants` est aussi chargée par le pipeline, les schémas doivent rester cohérents.
