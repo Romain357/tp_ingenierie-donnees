@@ -1,84 +1,44 @@
 import pandas as pd
+import os
 from pandas.errors import EmptyDataError
 from pathlib import Path
+from bq_utils import charger_dataframe_vers_bigquery
 
 
 def transformer_mesures():
-    dossier_entree = Path("tmp/data")
-    dossier_sortie = Path("tmp/data/transform")
-
-    dossier_sortie.mkdir(parents=True, exist_ok=True)
-
-    fichiers_mesures = list(
-        dossier_entree.glob("mesures_airpl*.csv")
-    )
-
+    dossier_entree = Path("/tmp/data")
+    fichiers_mesures = list(dossier_entree.glob("mesures_airpl*.csv"))
     liste_df = []
 
     for fichier in fichiers_mesures:
-        print(f"Lecture : {fichier.name}")
-
         try:
             df_temp = pd.read_csv(fichier)
-
-            if df_temp.empty:
-                print(f"Fichier vide ignoré : {fichier.name}")
-                continue
-
-            liste_df.append(df_temp)
-
+            if not df_temp.empty:
+                liste_df.append(df_temp)
         except EmptyDataError:
-            print(f"Fichier vide ignoré : {fichier.name}")
             continue
 
     if not liste_df:
-        print("Aucun fichier valide trouvé.")
         return
 
-    # fusion de tous les fichiers
     df = pd.concat(liste_df, ignore_index=True)
 
-    # garder uniquement les colonnes utiles
     df_mesures = df[
-        [
-            "id",
-            "code_station",
-            "code_polluant",
-            "code_commune",
-            "valeur",
-            "date_heure_tu",
-            "validite"
-        ]
-    ].copy()
-
-    # renommage pour correspondre au schéma SQL
+        ["id", "code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu", "validite"]].copy()
     df_mesures = df_mesures.rename(columns={
         "code_polluant": "id_poll_ue",
         "code_commune": "insee_com",
         "date_heure_tu": "date_mesure"
     })
+    df_mesures = df_mesures.dropna(subset=["code_station", "id_poll_ue", "insee_com"])
 
-    # suppression des lignes invalides
-    df_mesures = df_mesures.dropna(
-        subset=[
-            "code_station",
-            "id_poll_ue",
-            "insee_com"
-        ]
-    )
-
-    fichier_sortie = dossier_sortie / "mesures.csv"
-
-    df_mesures.to_csv(
-        fichier_sortie,
-        index=False,
-        encoding="utf-8"
-    )
-
-    print(f"Fichier créé : {fichier_sortie}")
     print(f"{len(df_mesures)} mesures récupérées")
-    print(df_mesures.head())
+
+    mode = os.environ.get("ETL_MODE", "INCREMENTAL")
+    doit_ecraser = True if mode == "FULL" else False
+
+    charger_dataframe_vers_bigquery(df_mesures, "fait_mesures", mode_ecrasement=doit_ecraser)
 
 
 if __name__ == "__main__":
-        transformer_mesures()
+    transformer_mesures()
