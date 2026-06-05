@@ -39,66 +39,80 @@ def transformer_mesures():
 
     charger_dataframe_vers_bigquery(df_mesures, "fait_mesures", mode_ecrasement=doit_ecraser)
 
+import pandas as pd
+from google.cloud import bigquery
+from bq_utils import charger_dataframe_vers_bigquery
+
+
 def creer_agregats():
-    dossier_entree = Path("/tmp/data")
-    fichiers_mesures = list(dossier_entree.glob("mesures_airpl*.csv"))
 
-    liste_df = []
+    client = bigquery.Client()
 
-    for fichier in fichiers_mesures:
-        try:
-            df_temp = pd.read_csv(fichier)
-            if not df_temp.empty:
-                liste_df.append(df_temp)
-        except EmptyDataError:
-            continue
+    query = """
+        SELECT
+            code_station,
+            id_poll_ue,
+            insee_com,
+            valeur,
+            date_mesure
+        FROM `tp-donnees-gp1.pollution_data.fait_mesures`
+        WHERE code_station IS NOT NULL
+          AND id_poll_ue IS NOT NULL
+          AND insee_com IS NOT NULL
+          AND valeur IS NOT NULL
+          AND date_mesure IS NOT NULL
+    """
 
-    if not liste_df:
-        print("Aucun fichier trouvé pour les agrégats")
+    df = client.query(query).to_dataframe()
+
+    if df.empty:
+        print("Aucune mesure trouvée")
         return
-
-    df = pd.concat(liste_df, ignore_index=True)
-
-    df = df[["code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu"]].copy()
-    df = df.rename(columns={
-        "code_polluant": "id_poll_ue",
-        "code_commune": "insee_com",
-        "date_heure_tu": "date_mesure"
-    })
 
     df["date_mesure"] = pd.to_datetime(df["date_mesure"])
     df["valeur"] = pd.to_numeric(df["valeur"], errors="coerce")
-    df = df.dropna(subset=["code_station", "id_poll_ue", "insee_com", "date_mesure", "valeur"])
 
     # ==========================
-    # TABLE JOUR
+    # AGRÉGAT JOUR
     # ==========================
     df["date_jour"] = df["date_mesure"].dt.date
-    mesures_jour = (
-        df.groupby(["date_jour", "code_station", "id_poll_ue", "insee_com"], as_index=False)
+
+    agregat_jour = (
+        df.groupby(
+            ["date_jour", "code_station", "id_poll_ue", "insee_com"],
+            as_index=False
+        )
         .agg(valeur=("valeur", "mean"))
     )
 
+    print(f"{len(agregat_jour)} agrégats journaliers générés")
+
+    charger_dataframe_vers_bigquery(
+        agregat_jour,
+        "agregat_jour",
+        mode_ecrasement=True
+    )
+
     # ==========================
-    # TABLE MOIS
+    # AGRÉGAT MOIS
     # ==========================
     df["date_mois"] = df["date_mesure"].dt.to_period("M").astype(str)
-    mesures_mois = (
-        df.groupby(["date_mois", "code_station", "id_poll_ue", "insee_com"], as_index=False)
+
+    agregat_mois = (
+        df.groupby(
+            ["date_mois", "code_station", "id_poll_ue", "insee_com"],
+            as_index=False
+        )
         .agg(valeur=("valeur", "mean"))
     )
 
-    # ==========================
-    # 2 & 3. EXPORT VERS BIGQUERY
-    # ==========================
-    mode = os.environ.get("ETL_MODE", "INCREMENTAL")
-    doit_ecraser = True if mode == "FULL" else False
+    print(f"{len(agregat_mois)} agrégats mensuels générés")
 
-    print(f"{len(mesures_jour)} agrégats journaliers générés.")
-    charger_dataframe_vers_bigquery(mesures_jour, "agregat_jour", mode_ecrasement=doit_ecraser)
-
-    print(f"{len(mesures_mois)} agrégats mensuels générés.")
-    charger_dataframe_vers_bigquery(mesures_mois, "agregat_mois", mode_ecrasement=doit_ecraser)
+    charger_dataframe_vers_bigquery(
+        agregat_mois,
+        "agregat_mois",
+        mode_ecrasement=True
+    )
 
 
 if __name__ == "__main__":
