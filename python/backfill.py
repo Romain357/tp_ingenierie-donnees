@@ -53,7 +53,8 @@ URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 def _create_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Session:
     s = requests.Session()
     retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=(429, 500, 502, 503, 504))
-    adapter = HTTPAdapter(max_retries=retry)
+    # increase pool size for concurrent workers
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
@@ -174,36 +175,44 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
                     logging.info("%s -> %d lignes", day, len(lines))
                     collected.extend(lines)
 
-        # Upload collected lines for the batch, in chunks of batch_size
+        # Upload collected lines for the batch, in chunks of batch_size — parallelize uploads
         logging.info("Batch %s -> collected %d lignes", f"{i // days_per_batch + 1}", len(collected))
-        buffer: List[dict] = []
-        with tqdm(desc="uploaded rows", unit="rows", leave=True, dynamic_ncols=True, file=sys.stdout) as rows_pbar:
-            for ligne in collected:
-                buffer.append(ligne)
-                if len(buffer) >= batch_size:
-                    df = _nettoyer(buffer)
-                    if df is not None and not df.empty:
-                        try:
-                            logging.info("Uploading %d rows to BigQuery (mode_ecrasement=%s)", len(df), first_upload)
-                            charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                            first_upload = False
-                            rows_uploaded += len(df)
-                            rows_pbar.update(len(df))
-                        except Exception:
-                            logging.exception("Failed to upload batch to BigQuery")
-                    buffer = []
+        upload_workers = min(8, max_workers)
+        upload_futures = []
+        from math import ceil
 
-            # flush remaining
-            df = _nettoyer(buffer)
-            if df is not None and not df.empty:
-                try:
-                    logging.info("Uploading final %d rows to BigQuery (mode_ecrasement=%s)", len(df), first_upload)
-                    charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                    first_upload = False
-                    rows_uploaded += len(df)
-                    rows_pbar.update(len(df))
-                except Exception:
-                    logging.exception("Failed to upload final batch to BigQuery")
+        def _upload_chunk(chunk: List[dict], mode_ecrasement_local: bool):
+            df_chunk = _nettoyer(chunk)
+            if df_chunk is None or df_chunk.empty:
+                return 0
+            try:
+                logging.info("Uploading chunk %d rows (mode_ecrasement=%s)", len(df_chunk), mode_ecrasement_local)
+                charger_dataframe_vers_bigquery(df_chunk, "fait_mesures", mode_ecrasement=mode_ecrasement_local)
+                return len(df_chunk)
+            except Exception:
+                logging.exception("Upload chunk failed")
+                return 0
+
+        # prepare chunks
+        chunks: List[List[dict]] = []
+        for j in range(0, len(collected), batch_size):
+            chunks.append(collected[j : j + batch_size])
+
+        if chunks:
+            # ensure only the very first upload uses truncation
+            trunc_flag_for_first = first_upload
+            with ThreadPoolExecutor(max_workers=upload_workers) as upl_ex:
+                with tqdm(total=len(chunks), desc="upload chunks", unit="chunk", leave=True, dynamic_ncols=True, file=sys.stdout) as chunk_pbar:
+                    for idx, ch in enumerate(chunks):
+                        mode_flag = trunc_flag_for_first if idx == 0 and trunc_flag_for_first else False
+                        fut = upl_ex.submit(_upload_chunk, ch, mode_flag)
+                        upload_futures.append(fut)
+                    # wait for uploads of this batch to finish and aggregate
+                    for fut in as_completed(upload_futures):
+                        rows = fut.result() or 0
+                        rows_uploaded += rows
+                        chunk_pbar.update(1)
+            first_upload = False
 
     # optional local save if requested
     if save_csv or (save_csv is None and rows_uploaded > 0):
