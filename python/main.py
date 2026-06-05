@@ -7,7 +7,7 @@ from extraction import extraire_mesures
 from TransformationTableJaune import transformer_communes
 from TransformationTableBleu import transformer_polluants
 from TransformationTableOrange import transformer_stations
-from TransformationTableVerte import transformer_mesures
+from TransformationTableVerte import transformer_mesures, creer_agregats
 
 
 def run_etl():
@@ -22,6 +22,7 @@ def run_etl():
     transformer_polluants()
     transformer_stations()
     transformer_mesures()
+    creer_agregats()
 
     print("🚀 ETL terminé avec succès !")
 
