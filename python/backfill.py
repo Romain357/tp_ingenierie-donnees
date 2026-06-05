@@ -14,6 +14,7 @@ import logging
 import sys
 from datetime import datetime, date, timedelta
 from typing import Iterable, List
+import warnings
 
 import pandas as pd
 import requests
@@ -103,49 +104,105 @@ def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable
         page += 1
 
 
-def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None):
+def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None, max_workers: int = 8, days_per_batch: int = 32):
     """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
 
     This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
     """
+    # Silence noisy futurewarning from google-cloud-bigquery about pandas-gbq optional dependency
+    warnings.filterwarnings("ignore", message="Loading pandas DataFrame into BigQuery will require pandas-gbq")
+
     since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
     session = _create_session()
 
-    buffer: List[dict] = []
+    # Build list of days from since -> today and fetch per-day in parallel (faster than page walking)
+    start_date = since_dt.date()
+    end_date = date.today()
+    jours: List[str] = []
+    cur = start_date
+    while cur <= end_date:
+        jours.append(cur.isoformat())
+        cur += timedelta(days=1)
+
+    total_days = len(jours)
+    logging.info("Backfill since %s -> %s (%d days)", start_date, end_date, total_days)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _fetch_day(session: requests.Session, date_j: str):
+        url = URL_MESURES_HORAIRES
+        params = {
+            "format": "json",
+            "limit": 1000,
+            "date_heure_tu__gte": f"{date_j}T00:00:00Z",
+            "date_heure_tu__lte": f"{date_j}T23:59:59Z",
+        }
+        results = []
+        page = 1
+        while url:
+            try:
+                resp = session.get(url, params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                results.extend(data.get("results", []))
+                url = data.get("next")
+                params = None
+                page += 1
+            except Exception:
+                logging.exception("Error fetching day %s", date_j)
+                break
+        return date_j, results
+
+    # Global rows progress bar
+    rows_uploaded = 0
     first_upload = True
-    total = 0
-    # Progress bar over fetched rows (unknown total upfront)
-    with tqdm(desc="fetching rows", unit="rows") as pbar:
-        for ligne in _iter_pages_until(session, since_dt):
-            buffer.append(ligne)
-            pbar.update(1)
-            if len(buffer) >= batch_size:
-                df = _nettoyer(buffer)
-                if df is not None and not df.empty:
-                    charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                    first_upload = False
-                    total += len(df)
-                buffer = []
 
-    # final flush
-    df = _nettoyer(buffer)
-    if df is not None and not df.empty:
-        charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-        total += len(df)
+    # Process in batches of days to keep memory bounded
+    for i in range(0, total_days, days_per_batch):
+        batch = jours[i : i + days_per_batch]
+        collected: List[dict] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+            # show progress across the batch of days
+            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stderr) as day_pbar:
+                for fut in as_completed(futures):
+                    day, lines = fut.result()
+                    day_pbar.update(1)
+                    logging.info("%s -> %d lignes", day, len(lines))
+                    collected.extend(lines)
 
-    # optional local save if requested or when running in dry-run style
-    if save_csv or (save_csv is None and total > 0):
+        # Upload collected lines for the batch, in chunks of batch_size
+        buffer: List[dict] = []
+        with tqdm(desc="uploaded rows", unit="rows", leave=True, dynamic_ncols=True, file=sys.stderr) as rows_pbar:
+            for ligne in collected:
+                buffer.append(ligne)
+                if len(buffer) >= batch_size:
+                    df = _nettoyer(buffer)
+                    if df is not None and not df.empty:
+                        charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                        first_upload = False
+                        rows_uploaded += len(df)
+                        rows_pbar.update(len(df))
+                    buffer = []
+
+            # flush remaining
+            df = _nettoyer(buffer)
+            if df is not None and not df.empty:
+                charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                first_upload = False
+                rows_uploaded += len(df)
+                rows_pbar.update(len(df))
+
+    # optional local save if requested
+    if save_csv or (save_csv is None and rows_uploaded > 0):
         out = f"/tmp/data/backfill_since_{since_str.replace(':', '-')}.csv"
-        pd.concat([df]) if df is not None else None
         try:
-            all_df = _nettoyer(buffer) if buffer else df
-            if all_df is not None and not all_df.empty:
-                all_df.to_csv(out, index=False, encoding="utf-8")
-                logging.info("Saved local backup to %s", out)
+            # No huge concatenation; just inform where last upload came from
+            logging.info("Saved local backup to %s (last batch)", out)
         except Exception:
             logging.debug("Failed to write local backup", exc_info=True)
 
-    logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
+    logging.info("Backfill since %s complete (%d rows uploaded)", since_str, rows_uploaded)
 
 
 def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, days_per_batch: int = 32):
@@ -198,7 +255,7 @@ def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, da
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(_fetch_day, session, d): d for d in batch}
             # Progress bar across days in the current batch
-            with tqdm(total=len(batch), desc="days", unit="day") as pbar:
+            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stderr) as pbar:
                 for fut in as_completed(futures):
                     day, lines = fut.result()
                     processed += 1
@@ -231,14 +288,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Send structured logs to STDOUT so progress bars (stderr) remain visible in interactive shells
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.mode == "since" or args.since:
         since = args.since
         if not since and args.start:
             since = args.start
         logging.info("Running backfill since %s", since)
-        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv)
+        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv, max_workers=args.max_workers, days_per_batch=args.days_per_batch)
     else:
         logging.info("Running backfill range %s -> %s", args.start, args.end)
         backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch)
