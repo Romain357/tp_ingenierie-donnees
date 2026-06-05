@@ -161,15 +161,15 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
     for i in range(0, total_days, days_per_batch):
         batch = jours[i : i + days_per_batch]
         collected: List[dict] = []
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futures = {ex.submit(_fetch_day, session, d): d for d in batch}
-                # show progress across the batch of days (write to stdout for Cloud Shell)
-                with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stdout) as day_pbar:
-                    for fut in as_completed(futures):
-                        day, lines = fut.result()
-                        day_pbar.update(1)
-                        logging.info("%s -> %d lignes", day, len(lines))
-                        collected.extend(lines)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+            # show progress across the batch of days (write to stdout for Cloud Shell)
+            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stdout) as day_pbar:
+                for fut in as_completed(futures):
+                    day, lines = fut.result()
+                    day_pbar.update(1)
+                    logging.info("%s -> %d lignes", day, len(lines))
+                    collected.extend(lines)
 
         # Upload collected lines for the batch, in chunks of batch_size
         buffer: List[dict] = []
