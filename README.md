@@ -33,19 +33,25 @@ Liens utiles projet :
 
 ### Fichiers principaux
 
-- `main.py` : orchestration complète du pipeline ETL.
+- Tous les scripts Python sont désormais dans `python/`.
+- `python/main.py` : orchestration complète du pipeline ETL.
 - Extraction :
-  - `extractiondepartement.py`
-  - `extractionstation.py`
-  - `extractpolluant.py`
-  - `extraction.py` (mesures horaires)
+  - `python/extractiondepartement.py`
+  - `python/extractionstation.py`
+  - `python/extractpolluant.py`
+  - `python/extraction.py` (mesures horaires)
 - Transformation / chargement BigQuery :
-  - `TransformationTableJaune.py` → `dim_communes`
-  - `TransformationTableBleu.py` → `dim_polluants`
-  - `TransformationTableOrange.py` → `dim_stations`
-  - `TransformationTableVerte.py` → `fait_mesures`
-- `bq_utils.py` : utilitaire de chargement DataFrame vers BigQuery.
+  - `python/TransformationTableJaune.py` → `dim_communes`
+  - `python/TransformationTableBleu.py` → `dim_polluants`
+  - `python/TransformationTableOrange.py` → `dim_stations`
+  - `python/TransformationTableVerte.py` → `fait_mesures`
+- `python/bq_utils.py` : utilitaire de chargement DataFrame vers BigQuery.
 - `Dockerfile` : exécution conteneurisée.
+
+### Versions Notebook
+
+- `python/backfill.ipynb` : version notebook du backfill massif.
+- Les autres scripts Python disposent aussi de leur miroir notebook dans `python/` pour les tests et l'exploration.
 
 ### Flux de traitement
 
@@ -116,7 +122,7 @@ pip install -r requirements.txt
 
 ```bash
 cd /tmp/workspace/Romain357/tp_ingenierie-donnees
-python main.py
+python python/main.py
 ```
 
 ### Modes de chargement des mesures (`ETL_MODE`)
@@ -127,7 +133,7 @@ python main.py
 Exemple :
 
 ```bash
-ETL_MODE=FULL python main.py
+ETL_MODE=FULL python python/main.py
 ```
 
 ## 8) Détails fonctionnels actuels
@@ -161,14 +167,19 @@ docker build -t airnaoned-etl .
 docker run --rm airnaoned-etl
 ```
 
-## 11) Limites et pistes d’amélioration
+## 11) Notebook de tests
+
+Un notebook de test est disponible à la racine du projet : `tests_pipeline.ipynb`.
+Il charge les modules depuis `python/` et sert de point d’entrée interactif pour vérifier les imports et exécuter le pipeline manuellement.
+
+## 12) Limites et pistes d’amélioration
 
 - Ajouter des tests automatisés (unitaires + intégration)
 - Rendre les paramètres (projet GCP, dataset, date de traitement) configurables
 - Industrialiser l’ordonnancement (Cloud Composer / cron / Cloud Run Jobs)
 - Implémenter les calculs IQA et la logique d’alerte directement dans le pipeline
 
-## 12) Contact projet (cours)
+## 13) Contact projet (cours)
 
 **Jérémy KLAUER** — Tech Lead Data  
 BPCE Solutions Informatiques  
