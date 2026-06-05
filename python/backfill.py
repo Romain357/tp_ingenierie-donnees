@@ -161,19 +161,19 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
     for i in range(0, total_days, days_per_batch):
         batch = jours[i : i + days_per_batch]
         collected: List[dict] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
-            # show progress across the batch of days
-            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stderr) as day_pbar:
-                for fut in as_completed(futures):
-                    day, lines = fut.result()
-                    day_pbar.update(1)
-                    logging.info("%s -> %d lignes", day, len(lines))
-                    collected.extend(lines)
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+                # show progress across the batch of days (write to stdout for Cloud Shell)
+                with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stdout) as day_pbar:
+                    for fut in as_completed(futures):
+                        day, lines = fut.result()
+                        day_pbar.update(1)
+                        logging.info("%s -> %d lignes", day, len(lines))
+                        collected.extend(lines)
 
         # Upload collected lines for the batch, in chunks of batch_size
         buffer: List[dict] = []
-        with tqdm(desc="uploaded rows", unit="rows", leave=True, dynamic_ncols=True, file=sys.stderr) as rows_pbar:
+        with tqdm(desc="uploaded rows", unit="rows", leave=True, dynamic_ncols=True, file=sys.stdout) as rows_pbar:
             for ligne in collected:
                 buffer.append(ligne)
                 if len(buffer) >= batch_size:
@@ -254,8 +254,8 @@ def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, da
         collected: List[dict] = []
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(_fetch_day, session, d): d for d in batch}
-            # Progress bar across days in the current batch
-            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stderr) as pbar:
+            # Progress bar across days in the current batch (stdout for Cloud Shell)
+            with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stdout) as pbar:
                 for fut in as_completed(futures):
                     day, lines = fut.result()
                     processed += 1
@@ -288,8 +288,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    # Send structured logs to STDOUT so progress bars (stderr) remain visible in interactive shells
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # Send structured logs to STDERR so progress bars (stdout) remain visible in Cloud Shell
+    logging.basicConfig(stream=sys.stderr, level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     if args.mode == "since" or args.since:
         since = args.since
