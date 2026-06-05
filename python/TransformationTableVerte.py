@@ -3,6 +3,7 @@ import os
 from pandas.errors import EmptyDataError
 from pathlib import Path
 from bq_utils import charger_dataframe_vers_bigquery
+from google.cloud import bigquery
 
 
 def transformer_mesures():
@@ -38,12 +39,6 @@ def transformer_mesures():
     doit_ecraser = True if mode == "FULL" else False
 
     charger_dataframe_vers_bigquery(df_mesures, "fait_mesures", mode_ecrasement=doit_ecraser)
-
-import pandas as pd
-from google.cloud import bigquery
-from bq_utils import charger_dataframe_vers_bigquery
-
-
 def creer_agregats():
 
     client = bigquery.Client()
@@ -89,7 +84,7 @@ def creer_agregats():
 
     charger_dataframe_vers_bigquery(
         agregat_jour,
-        "agregat_jour",
+        "fait_mesures_jour",
         mode_ecrasement=True
     )
 
@@ -110,7 +105,7 @@ def creer_agregats():
 
     charger_dataframe_vers_bigquery(
         agregat_mois,
-        "agregat_mois",
+        "fait_mesures_mois",
         mode_ecrasement=True
     )
 
