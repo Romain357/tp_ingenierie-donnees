@@ -26,10 +26,11 @@ from bq_utils import charger_dataframe_vers_bigquery
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 
 
-def _create_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Session:
+def _create_session(retries: int = 3, backoff_factor: float = 0.5, pool_size: int = 25) -> requests.Session:
     s = requests.Session()
     retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=(429, 500, 502, 503, 504))
-    adapter = HTTPAdapter(max_retries=retry)
+    # tune connection pool for concurrent workers
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_size, pool_maxsize=pool_size)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
@@ -80,33 +81,53 @@ def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable
         page += 1
 
 
-def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None):
+def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None, upload_workers: int = 4, http_pool_size: int = 25):
     """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
 
     This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
     """
     since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
-    session = _create_session()
+    session = _create_session(pool_size=http_pool_size)
 
     buffer: List[dict] = []
     first_upload = True
     total = 0
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # executor for uploads
+    upload_executor = ThreadPoolExecutor(max_workers=upload_workers)
+    upload_futures = []
 
     for ligne in _iter_pages_until(session, since_dt):
         buffer.append(ligne)
         if len(buffer) >= batch_size:
             df = _nettoyer(buffer)
             if df is not None and not df.empty:
-                charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                mode_flag = first_upload
                 first_upload = False
+                # submit upload and continue fetching
+                fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures", mode_flag)
+                upload_futures.append(fut)
                 total += len(df)
             buffer = []
 
     # final flush
     df = _nettoyer(buffer)
     if df is not None and not df.empty:
-        charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+        mode_flag = first_upload
+        first_upload = False
+        fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures", mode_flag)
+        upload_futures.append(fut)
         total += len(df)
+
+    # wait for uploads to finish
+    for fut in upload_futures:
+        try:
+            fut.result()
+        except Exception:
+            logging.exception("Upload task failed")
+
+    upload_executor.shutdown(wait=True)
 
     # optional local save if requested or when running in dry-run style
     if save_csv or (save_csv is None and total > 0):
@@ -123,7 +144,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
     logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
 
 
-def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, days_per_batch: int = 32):
+def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, days_per_batch: int = 32, http_pool_size: int = 25):
     """Backfill by fetching each day in parallel (range mode)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -163,7 +184,7 @@ def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, da
                 break
         return date_j, results
 
-    session = _create_session()
+    session = _create_session(pool_size=http_pool_size)
     processed = 0
     first_upload = True
 
@@ -196,6 +217,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=10000, help="Number of rows per upload batch for since mode")
     p.add_argument("--days-per-batch", type=int, default=32, help="Number of days to process per parallel batch in range mode")
     p.add_argument("--max-workers", type=int, default=8, help="Max threads for range mode")
+    p.add_argument("--upload-workers", type=int, default=4, help="Number of parallel upload workers")
+    p.add_argument("--http-pool-size", type=int, default=25, help="HTTP connection pool size per session")
     p.add_argument("--save-csv", action="store_true", help="Save a local CSV backup of the final batch")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
@@ -210,10 +233,10 @@ def main(argv: list[str] | None = None):
         if not since and args.start:
             since = args.start
         logging.info("Running backfill since %s", since)
-        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv)
+        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv, upload_workers=args.upload_workers, http_pool_size=args.http_pool_size)
     else:
         logging.info("Running backfill range %s -> %s", args.start, args.end)
-        backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch)
+        backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch, http_pool_size=args.http_pool_size)
 
 
 if __name__ == "__main__":

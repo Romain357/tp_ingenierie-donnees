@@ -3,3 +3,4 @@ requests
 google-cloud-bigquery
 pyarrow
 db-dtypes
+pandas-gbq>=0.26.1
