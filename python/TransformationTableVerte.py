@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+import logging
 from pandas.errors import EmptyDataError
 from pathlib import Path
 from bq_utils import charger_dataframe_vers_bigquery
@@ -40,74 +41,62 @@ def transformer_mesures():
 
     charger_dataframe_vers_bigquery(df_mesures, "fait_mesures", mode_ecrasement=doit_ecraser)
 def creer_agregats():
+    client = bigquery.Client(project="tp-donnees-gp1")
 
-    client = bigquery.Client()
+    requetes_sql = [
+        (
+            "agregat_jour",
+            """
+            CREATE OR REPLACE TABLE `tp-donnees-gp1.pollution_data.fait_mesures_jour` AS
+            SELECT
+              DATE(date_mesure) AS date_jour,
+              code_station,
+              id_poll_ue,
+              insee_com,
+              AVG(CAST(valeur AS FLOAT64)) AS valeur
+            FROM `tp-donnees-gp1.pollution_data.fait_mesures`
+            WHERE code_station IS NOT NULL
+              AND id_poll_ue IS NOT NULL
+              AND insee_com IS NOT NULL
+              AND valeur IS NOT NULL
+              AND date_mesure IS NOT NULL
+            GROUP BY
+              date_jour,
+              code_station,
+              id_poll_ue,
+              insee_com;
+            """,
+        ),
+        (
+            "agregat_mois",
+            """
+            CREATE OR REPLACE TABLE `tp-donnees-gp1.pollution_data.fait_mesures_mois` AS
+            SELECT
+              FORMAT_DATE('%Y-%m', DATE(date_mesure)) AS date_mois,
+              code_station,
+              id_poll_ue,
+              insee_com,
+              AVG(CAST(valeur AS FLOAT64)) AS valeur
+            FROM `tp-donnees-gp1.pollution_data.fait_mesures`
+            WHERE code_station IS NOT NULL
+              AND id_poll_ue IS NOT NULL
+              AND insee_com IS NOT NULL
+              AND valeur IS NOT NULL
+              AND date_mesure IS NOT NULL
+            GROUP BY
+              date_mois,
+              code_station,
+              id_poll_ue,
+              insee_com;
+            """,
+        ),
+    ]
 
-    query = """
-        SELECT
-            code_station,
-            id_poll_ue,
-            insee_com,
-            valeur,
-            date_mesure
-        FROM `tp-donnees-gp1.pollution_data.fait_mesures`
-        WHERE code_station IS NOT NULL
-          AND id_poll_ue IS NOT NULL
-          AND insee_com IS NOT NULL
-          AND valeur IS NOT NULL
-          AND date_mesure IS NOT NULL
-    """
-
-    df = client.query(query).to_dataframe()
-
-    if df.empty:
-        print("Aucune mesure trouvée")
-        return
-
-    df["date_mesure"] = pd.to_datetime(df["date_mesure"])
-    df["valeur"] = pd.to_numeric(df["valeur"], errors="coerce")
-
-    # ==========================
-    # AGRÉGAT JOUR
-    # ==========================
-    df["date_jour"] = df["date_mesure"].dt.date
-
-    agregat_jour = (
-        df.groupby(
-            ["date_jour", "code_station", "id_poll_ue", "insee_com"],
-            as_index=False
-        )
-        .agg(valeur=("valeur", "mean"))
-    )
-
-    print(f"{len(agregat_jour)} agrégats journaliers générés")
-
-    charger_dataframe_vers_bigquery(
-        agregat_jour,
-        "fait_mesures_jour",
-        mode_ecrasement=True
-    )
-
-    # ==========================
-    # AGRÉGAT MOIS
-    # ==========================
-    df["date_mois"] = df["date_mesure"].dt.to_period("M").astype(str)
-
-    agregat_mois = (
-        df.groupby(
-            ["date_mois", "code_station", "id_poll_ue", "insee_com"],
-            as_index=False
-        )
-        .agg(valeur=("valeur", "mean"))
-    )
-
-    print(f"{len(agregat_mois)} agrégats mensuels générés")
-
-    charger_dataframe_vers_bigquery(
-        agregat_mois,
-        "fait_mesures_mois",
-        mode_ecrasement=True
-    )
+    for nom_table, requete in requetes_sql:
+        logging.info("Exécution de la requête SQL pour %s", nom_table)
+        job = client.query(requete)
+        job.result()
+        logging.info("Table %s mise à jour dans BigQuery", nom_table)
 
 
 if __name__ == "__main__":
