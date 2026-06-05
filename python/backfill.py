@@ -22,6 +22,29 @@ from urllib3.util.retry import Retry
 
 from bq_utils import charger_dataframe_vers_bigquery
 
+# Optional progress bar (tqdm). Provide a lightweight fallback if not installed.
+try:
+    from tqdm.auto import tqdm
+except Exception:  # pragma: no cover - fallback when tqdm missing
+    class _DummyTqdm:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def update(self, n=1):
+            return None
+
+        def set_description(self, *a, **k):
+            return None
+
+    def tqdm(*a, **k):
+        return _DummyTqdm()
+
 
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 
@@ -91,16 +114,18 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
     buffer: List[dict] = []
     first_upload = True
     total = 0
-
-    for ligne in _iter_pages_until(session, since_dt):
-        buffer.append(ligne)
-        if len(buffer) >= batch_size:
-            df = _nettoyer(buffer)
-            if df is not None and not df.empty:
-                charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                first_upload = False
-                total += len(df)
-            buffer = []
+    # Progress bar over fetched rows (unknown total upfront)
+    with tqdm(desc="fetching rows", unit="rows") as pbar:
+        for ligne in _iter_pages_until(session, since_dt):
+            buffer.append(ligne)
+            pbar.update(1)
+            if len(buffer) >= batch_size:
+                df = _nettoyer(buffer)
+                if df is not None and not df.empty:
+                    charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                    first_upload = False
+                    total += len(df)
+                buffer = []
 
     # final flush
     df = _nettoyer(buffer)
@@ -172,11 +197,14 @@ def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, da
         collected: List[dict] = []
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {ex.submit(_fetch_day, session, d): d for d in batch}
-            for fut in as_completed(futures):
-                day, lines = fut.result()
-                processed += 1
-                logging.info("[%d/%d] %s -> %d lignes", processed, total, day, len(lines))
-                collected.extend(lines)
+            # Progress bar across days in the current batch
+            with tqdm(total=len(batch), desc="days", unit="day") as pbar:
+                for fut in as_completed(futures):
+                    day, lines = fut.result()
+                    processed += 1
+                    pbar.update(1)
+                    logging.info("[%d/%d] %s -> %d lignes", processed, total, day, len(lines))
+                    collected.extend(lines)
 
         df = _nettoyer(collected)
         if df is not None and not df.empty:
