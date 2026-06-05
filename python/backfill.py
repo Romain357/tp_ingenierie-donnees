@@ -129,7 +129,9 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def _fetch_day(session: requests.Session, date_j: str):
+    def _fetch_day(date_j: str):
+        # create a fresh session per worker to avoid shared-session blocking
+        session_local = _create_session()
         url = URL_MESURES_HORAIRES
         params = {
             "format": "json",
@@ -141,7 +143,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
         page = 1
         while url:
             try:
-                resp = session.get(url, params=params, timeout=30)
+                resp = session_local.get(url, params=params, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
                 results.extend(data.get("results", []))
@@ -162,7 +164,8 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
         batch = jours[i : i + days_per_batch]
         collected: List[dict] = []
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+            futures = {ex.submit(_fetch_day, d): d for d in batch}
+            logging.info("Submitted %d fetch tasks for batch %d", len(futures), (i // days_per_batch) + 1)
             # show progress across the batch of days (write to stdout for Cloud Shell)
             with tqdm(total=len(batch), desc="days", unit="day", leave=True, dynamic_ncols=True, file=sys.stdout) as day_pbar:
                 for fut in as_completed(futures):
@@ -172,6 +175,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
                     collected.extend(lines)
 
         # Upload collected lines for the batch, in chunks of batch_size
+        logging.info("Batch %s -> collected %d lignes", f"{i // days_per_batch + 1}", len(collected))
         buffer: List[dict] = []
         with tqdm(desc="uploaded rows", unit="rows", leave=True, dynamic_ncols=True, file=sys.stdout) as rows_pbar:
             for ligne in collected:
@@ -179,19 +183,27 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
                 if len(buffer) >= batch_size:
                     df = _nettoyer(buffer)
                     if df is not None and not df.empty:
-                        charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                        first_upload = False
-                        rows_uploaded += len(df)
-                        rows_pbar.update(len(df))
+                        try:
+                            logging.info("Uploading %d rows to BigQuery (mode_ecrasement=%s)", len(df), first_upload)
+                            charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                            first_upload = False
+                            rows_uploaded += len(df)
+                            rows_pbar.update(len(df))
+                        except Exception:
+                            logging.exception("Failed to upload batch to BigQuery")
                     buffer = []
 
             # flush remaining
             df = _nettoyer(buffer)
             if df is not None and not df.empty:
-                charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
-                first_upload = False
-                rows_uploaded += len(df)
-                rows_pbar.update(len(df))
+                try:
+                    logging.info("Uploading final %d rows to BigQuery (mode_ecrasement=%s)", len(df), first_upload)
+                    charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                    first_upload = False
+                    rows_uploaded += len(df)
+                    rows_pbar.update(len(df))
+                except Exception:
+                    logging.exception("Failed to upload final batch to BigQuery")
 
     # optional local save if requested
     if save_csv or (save_csv is None and rows_uploaded > 0):
