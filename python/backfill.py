@@ -1,47 +1,41 @@
+"""Backfill utility for AirPL measures.
+
+Improvements over the original version:
+- CLI with `--since` or `--start/--end` modes
+- HTTP session with retries and backoff
+- Optional parallel per-day fetching or single-pass pagination until a cutoff date
+- Batch upload to BigQuery with local CSV backup
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from datetime import datetime, date, timedelta
+from typing import Iterable, List
+
 import pandas as pd
 import requests
-import time
-from datetime import datetime, date, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from bq_utils import charger_dataframe_vers_bigquery
 
+
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
-MAX_WORKERS = 8   # requêtes API simultanées
-BATCH_SIZE = 32   # jours par lot avant envoi BigQuery
 
 
-def _extraire_jour(date_jour: str):
-    """Récupère toutes les mesures d'un jour donné via des filtres de date."""
-    url = URL_MESURES_HORAIRES
-    params = {
-        "format": "json",
-        "limit": 1000,
-        "date_heure_tu__gte": f"{date_jour}T00:00:00Z",
-        "date_heure_tu__lte": f"{date_jour}T23:59:59Z",
-    }
-    all_results = []
-    tentatives = 0
-
-    while url:
-        try:
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            all_results.extend(data.get("results", []))
-            url = data.get("next")
-            params = None
-            tentatives = 0
-        except Exception as e:
-            tentatives += 1
-            if tentatives > 3:
-                print(f"  ⚠️  Abandon {date_jour} après 3 tentatives : {e}")
-                break
-            time.sleep(5 * tentatives)
-
-    return date_jour, all_results
+def _create_session(retries: int = 3, backoff_factor: float = 0.5) -> requests.Session:
+    s = requests.Session()
+    retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=(429, 500, 502, 503, 504))
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
 
 
-def _nettoyer(lignes: list) -> pd.DataFrame | None:
+def _nettoyer(lignes: List[dict]) -> pd.DataFrame | None:
     if not lignes:
         return None
     df = pd.DataFrame(lignes)
@@ -55,42 +49,172 @@ def _nettoyer(lignes: list) -> pd.DataFrame | None:
     return df.dropna(subset=["code_station", "id_poll_ue", "insee_com"])
 
 
-def lancer_backfill_massif(date_debut_str: str, date_fin_str: str | None = None):
-    date_debut = datetime.strptime(date_debut_str, "%Y-%m-%dT%H:%M:%SZ").date()
-    date_fin = date.today() if date_fin_str is None else datetime.strptime(date_fin_str, "%Y-%m-%dT%H:%M:%SZ").date()
+def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable[dict]:
+    """Iterate over API pages (newest -> older) and yield result dicts until reaching since_dt."""
+    url = URL_MESURES_HORAIRES
+    params = {"format": "json", "limit": 1000}
+    page = 1
+    while url:
+        logging.debug("Fetching page %s: %s", page, url)
+        resp = session.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            break
+        for ligne in results:
+            date_str = ligne.get("date_heure_tu")
+            if not date_str:
+                continue
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
+            except ValueError:
+                continue
+            if dt >= since_dt:
+                yield ligne
+            else:
+                logging.info("Reached older data at page %s (date=%s)", page, date_str)
+                return
+        url = data.get("next")
+        params = None
+        page += 1
+
+
+def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None):
+    """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
+
+    This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
+    """
+    since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
+    session = _create_session()
+
+    buffer: List[dict] = []
+    first_upload = True
+    total = 0
+
+    for ligne in _iter_pages_until(session, since_dt):
+        buffer.append(ligne)
+        if len(buffer) >= batch_size:
+            df = _nettoyer(buffer)
+            if df is not None and not df.empty:
+                charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+                first_upload = False
+                total += len(df)
+            buffer = []
+
+    # final flush
+    df = _nettoyer(buffer)
+    if df is not None and not df.empty:
+        charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+        total += len(df)
+
+    # optional local save if requested or when running in dry-run style
+    if save_csv or (save_csv is None and total > 0):
+        out = f"/tmp/data/backfill_since_{since_str.replace(':', '-')}.csv"
+        pd.concat([df]) if df is not None else None
+        try:
+            all_df = _nettoyer(buffer) if buffer else df
+            if all_df is not None and not all_df.empty:
+                all_df.to_csv(out, index=False, encoding="utf-8")
+                logging.info("Saved local backup to %s", out)
+        except Exception:
+            logging.debug("Failed to write local backup", exc_info=True)
+
+    logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
+
+
+def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, days_per_batch: int = 32):
+    """Backfill by fetching each day in parallel (range mode)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    start_date = datetime.strptime(start_str, "%Y-%m-%dT%H:%M:%SZ").date()
+    end_date = date.today() if end_str is None else datetime.strptime(end_str, "%Y-%m-%dT%H:%M:%SZ").date()
 
     jours = []
-    cur = date_debut
-    while cur <= date_fin:
+    cur = start_date
+    while cur <= end_date:
         jours.append(cur.isoformat())
         cur += timedelta(days=1)
 
     total = len(jours)
-    print(f"Backfill du {date_debut} au {date_fin} : {total} jours")
-    print(f"Parallelisme : {MAX_WORKERS} requetes / lots de {BATCH_SIZE} jours")
+    logging.info("Backfill range %s -> %s (%d days)", start_date, end_date, total)
 
-    premier_lot = True
-    traites = 0
+    def _fetch_day(session: requests.Session, date_j: str):
+        url = URL_MESURES_HORAIRES
+        params = {
+            "format": "json",
+            "limit": 1000,
+            "date_heure_tu__gte": f"{date_j}T00:00:00Z",
+            "date_heure_tu__lte": f"{date_j}T23:59:59Z",
+        }
+        results = []
+        page = 1
+        while url:
+            try:
+                resp = session.get(url, params=params, timeout=30)
+                resp.raise_for_status()
+                data = resp.json()
+                results.extend(data.get("results", []))
+                url = data.get("next")
+                params = None
+                page += 1
+            except Exception:
+                logging.exception("Error fetching day %s", date_j)
+                break
+        return date_j, results
 
-    for i in range(0, total, BATCH_SIZE):
-        lot = jours[i: i + BATCH_SIZE]
-        toutes_lignes = []
+    session = _create_session()
+    processed = 0
+    first_upload = True
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(_extraire_jour, j): j for j in lot}
-            for future in as_completed(futures):
-                jour, lignes = future.result()
-                traites += 1
-                print(f"  [{traites:4d}/{total}] {jour} -> {len(lignes)} lignes")
-                toutes_lignes.extend(lignes)
+    for i in range(0, total, days_per_batch):
+        batch = jours[i : i + days_per_batch]
+        collected: List[dict] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+            for fut in as_completed(futures):
+                day, lines = fut.result()
+                processed += 1
+                logging.info("[%d/%d] %s -> %d lignes", processed, total, day, len(lines))
+                collected.extend(lines)
 
-        df = _nettoyer(toutes_lignes)
-        if df is not None and len(df) > 0:
-            charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=premier_lot)
-            premier_lot = False
+        df = _nettoyer(collected)
+        if df is not None and not df.empty:
+            charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+            first_upload = False
 
-    print(f"Backfill termine : {traites} jours traites.")
+    logging.info("Backfill range complete: %d days processed", processed)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Backfill AirPL measures to BigQuery")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--since", help="ISO UTC datetime (e.g. 2025-01-01T00:00:00Z) - keep records >= since and stop when older data encountered")
+    group.add_argument("--start", help="Start datetime for range mode (inclusive), ISO UTC")
+    p.add_argument("--end", help="End datetime for range mode (inclusive), ISO UTC")
+    p.add_argument("--mode", choices=("since", "range"), default="since")
+    p.add_argument("--batch-size", type=int, default=10000, help="Number of rows per upload batch for since mode")
+    p.add_argument("--days-per-batch", type=int, default=32, help="Number of days to process per parallel batch in range mode")
+    p.add_argument("--max-workers", type=int, default=8, help="Max threads for range mode")
+    p.add_argument("--save-csv", action="store_true", help="Save a local CSV backup of the final batch")
+    p.add_argument("--verbose", action="store_true")
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None):
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    if args.mode == "since" or args.since:
+        since = args.since
+        if not since and args.start:
+            since = args.start
+        logging.info("Running backfill since %s", since)
+        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv)
+    else:
+        logging.info("Running backfill range %s -> %s", args.start, args.end)
+        backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch)
 
 
 if __name__ == "__main__":
-    lancer_backfill_massif("2025-01-01T00:00:00Z")
+    main()
