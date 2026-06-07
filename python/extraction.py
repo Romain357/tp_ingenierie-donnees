@@ -1,7 +1,7 @@
 # extraction.py
 import requests
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import os
 
@@ -10,15 +10,12 @@ URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 
 def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
     url = URL_MESURES_HORAIRES
-    debut = f"{date_jour}T00:00:00Z"
-    fin = f"{date_jour}T23:59:59Z"
-
     params = {
         "format": "json",
         "limit": 1000,
-        "date_heure_tu__gte": debut,
-        "date_heure_tu__lte": fin
     }
+
+    date_cible = datetime.strptime(date_jour, "%Y-%m-%d").date()
 
     all_results = []
     page = 1
@@ -35,7 +32,20 @@ def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
         if not results:
             break
 
-        all_results.extend(results)
+        for mesure in results:
+            date_mesure = mesure.get("date_heure_tu")
+            if not date_mesure:
+                continue
+
+            try:
+                dt_mesure = datetime.strptime(date_mesure, "%Y-%m-%dT%H:%M:%SZ").date()
+            except ValueError:
+                continue
+
+            if dt_mesure == date_cible:
+                all_results.append(mesure)
+            elif dt_mesure < date_cible:
+                return pd.DataFrame(all_results)
 
         url = data.get("next")
         params = None
@@ -53,6 +63,7 @@ def extraire_mesures():
 
     print(f"Extraction des données du {date_cible} (Mode: {mode})")
     df = extraire_mesures_jour(date_cible)
+    print(f"{len(df)} mesures récupérées")
 
     dossier_sortie = Path("/tmp/data")
     dossier_sortie.mkdir(parents=True, exist_ok=True)
