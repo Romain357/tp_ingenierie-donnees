@@ -13,7 +13,7 @@ import argparse
 import logging
 import sys
 from datetime import datetime, date, timedelta
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import pandas as pd
 import requests
@@ -26,6 +26,11 @@ from bq_utils import charger_dataframe_vers_bigquery
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 
 
+def _est_valide(mesure: dict) -> bool:
+    valeur = mesure.get("validite")
+    return valeur is True or str(valeur).strip().lower() == "true"
+
+
 def _create_session(retries: int = 3, backoff_factor: float = 0.5, pool_size: int = 25) -> requests.Session:
     s = requests.Session()
     retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=(429, 500, 502, 503, 504))
@@ -36,7 +41,7 @@ def _create_session(retries: int = 3, backoff_factor: float = 0.5, pool_size: in
     return s
 
 
-def _nettoyer(lignes: List[dict]) -> pd.DataFrame | None:
+def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     if not lignes:
         return None
     df = pd.DataFrame(lignes)
@@ -72,7 +77,8 @@ def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable
             except ValueError:
                 continue
             if dt >= since_dt:
-                yield ligne
+                if _est_valide(ligne):
+                    yield ligne
             else:
                 logging.info("Reached older data at page %s (date=%s)", page, date_str)
                 return
@@ -81,7 +87,7 @@ def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable
         page += 1
 
 
-def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | None = None, upload_workers: int = 4, http_pool_size: int = 25):
+def backfill_since(since_str: str, batch_size: int = 10000, save_csv: Optional[bool] = None, upload_workers: int = 4, http_pool_size: int = 25):
     """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
 
     This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
@@ -144,7 +150,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: bool | Non
     logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
 
 
-def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, days_per_batch: int = 32, http_pool_size: int = 25):
+def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8, days_per_batch: int = 32, http_pool_size: int = 25):
     """Backfill by fetching each day in parallel (range mode)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -175,7 +181,7 @@ def backfill_range(start_str: str, end_str: str | None, max_workers: int = 8, da
                 resp = session.get(url, params=params, timeout=30)
                 resp.raise_for_status()
                 data = resp.json()
-                results.extend(data.get("results", []))
+                results.extend(ligne for ligne in data.get("results", []) if _est_valide(ligne))
                 url = data.get("next")
                 params = None
                 page += 1
@@ -224,7 +230,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None):
+def main(argv=None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 

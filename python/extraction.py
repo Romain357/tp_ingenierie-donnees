@@ -8,6 +8,11 @@ import os
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 
 
+def _est_valide(mesure: dict) -> bool:
+    valeur = mesure.get("validite")
+    return valeur is True or str(valeur).strip().lower() == "true"
+
+
 def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
     url = URL_MESURES_HORAIRES
     params = {
@@ -43,7 +48,8 @@ def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
                 continue
 
             if dt_mesure == date_cible:
-                all_results.append(mesure)
+                if _est_valide(mesure):
+                    all_results.append(mesure)
             elif dt_mesure < date_cible:
                 return pd.DataFrame(all_results)
 
