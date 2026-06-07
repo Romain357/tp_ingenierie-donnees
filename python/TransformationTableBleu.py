@@ -38,8 +38,6 @@ def transformer_polluants():
 
     df_polluants["code_poll"] = df_polluants["code_poll"].astype(int)
 
-    return df_polluants
-
 
 if __name__ == "__main__":
     transformer_polluants()
