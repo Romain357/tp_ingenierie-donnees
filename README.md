@@ -127,7 +127,7 @@ python python/main.py
 
 ### Modes de chargement des mesures (`ETL_MODE`)
 
-- `INCREMENTAL` (par défaut) : append dans `fait_mesures`
+- `INCREMENTAL` (par défaut) : suppression préalable des lignes de la date ciblée, puis insert dans `fait_mesures`
 - `FULL` : écrase `fait_mesures`
 
 Exemple :

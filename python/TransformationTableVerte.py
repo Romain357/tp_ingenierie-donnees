@@ -38,8 +38,14 @@ def transformer_mesures():
 
     mode = os.environ.get("ETL_MODE", "INCREMENTAL")
     doit_ecraser = True if mode == "FULL" else False
+    nettoyage_prealable = mode != "FULL"
 
-    charger_dataframe_vers_bigquery(df_mesures, "fait_mesures", mode_ecrasement=doit_ecraser)
+    charger_dataframe_vers_bigquery(
+        df_mesures,
+        "fait_mesures",
+        mode_ecrasement=doit_ecraser,
+        nettoyage_prealable=nettoyage_prealable,
+    )
 def creer_agregats():
     client = bigquery.Client(project="tp-donnees-gp1")
 
