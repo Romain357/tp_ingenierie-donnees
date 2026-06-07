@@ -3,9 +3,6 @@ from pathlib import Path
 from bq_utils import charger_dataframe_vers_bigquery
 
 
-import pandas as pd
-from pathlib import Path
-
 
 def transformer_polluants():
     dossier_entree = Path("/tmp/data")
