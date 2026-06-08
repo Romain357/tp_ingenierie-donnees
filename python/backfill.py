@@ -52,6 +52,10 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
         "code_commune": "insee_com",
         "date_heure_tu": "date_mesure",
     })
+    # Filtrer uniquement les mesures valides
+    if "validite" in df.columns:
+        df = df[df["validite"].astype(str).str.lower() == "true"].copy()
+        df = df.drop(columns=[c for c in ("validite",) if c in df.columns])
     # Filtrer uniquement les polluants autorisés et normaliser le format
     if "code_polluant" in df.columns:
         df["code_polluant"] = pd.to_numeric(df["code_polluant"], errors="coerce")
@@ -64,7 +68,7 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
 def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable[dict]:
     """Iterate over API pages (newest -> older) and yield result dicts until reaching since_dt."""
     url = URL_MESURES_HORAIRES
-    params = {"format": "json", "limit": 1000}
+    params = {"format": "json", "limit": 1000, "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES))}
     page = 1
     while url:
         logging.debug("Fetching page %s: %s", page, url)
@@ -167,6 +171,7 @@ def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8,
             "limit": 1000,
             "date_heure_tu__gte": f"{date_j}T00:00:00Z",
             "date_heure_tu__lte": f"{date_j}T23:59:59Z",
+            "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES)),
         }
         results = []
         page = 1
