@@ -5,7 +5,7 @@ import pandas as pd
 
 TABLE_SCHEMAS = {
     "communes": [
-        bigquery.SchemaField("insee_com", "INTEGER"),
+        bigquery.SchemaField("insee_com", "STRING"),
         bigquery.SchemaField("nom_com", "STRING"),
         bigquery.SchemaField("code_dept", "STRING"),
     ],
@@ -25,7 +25,7 @@ TABLE_SCHEMAS = {
         bigquery.SchemaField("valeur", "FLOAT"),
         bigquery.SchemaField("code_station", "STRING"),
         bigquery.SchemaField("code_polluant", "STRING"),
-        bigquery.SchemaField("insee_com", "INTEGER"),
+        bigquery.SchemaField("insee_com", "STRING"),
     ],
 }
 
