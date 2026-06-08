@@ -17,7 +17,7 @@ def transformer_stations():
     df_stations = df_stations.dropna(subset=["code_station"])
 
     print(f"{len(df_stations)} stations récupérées")
-    charger_dataframe_vers_bigquery(df_stations, "dim_stations", mode_ecrasement=True)
+    charger_dataframe_vers_bigquery(df_stations, "stations", mode_ecrasement=True)
 
 
 if __name__ == "__main__":
