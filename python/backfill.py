@@ -89,9 +89,8 @@ def _fetch_day_window(pool_size: int, day: str, start_iso: str, end_iso: str) ->
     url = URL_MESURES_HORAIRES
     params = {
         "format": "json",
-        "limit": 1000,
-        "date_heure_tu__gte": start_iso,
-        "date_heure_tu__lte": end_iso,
+        "limit": 5000,
+        "date_heure_tu__range": f"{start_iso[:10]},{end_iso[:10]}",
         "code_polluant__in": _polluants_query_string(),
         "validite": "true",
         "code_configuration_de_mesure__code_point_de_prelevement__code_station__code_commune__code_departement__in": _departements_query_string(),
@@ -160,6 +159,7 @@ def backfill_since(
             for day in batch:
                 day_start = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if day == start_date.isoformat() else f"{day}T00:00:00Z"
                 day_end = f"{day}T23:59:59Z"
+                logging.info("Submitting day %s", day)
                 futures[ex.submit(_fetch_day_window, http_pool_size, day, day_start, day_end)] = day
 
             for fut in as_completed(futures):
