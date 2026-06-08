@@ -45,14 +45,13 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     if not lignes:
         return None
     df = pd.DataFrame(lignes)
-    cols = ["id", "code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu", "validite"]
+    cols = ["id", "code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu"]
     df = df[[c for c in cols if c in df.columns]].copy()
     df = df.rename(columns={
-        "code_polluant": "id_poll_ue",
         "code_commune": "insee_com",
         "date_heure_tu": "date_mesure",
     })
-    return df.dropna(subset=["code_station", "id_poll_ue", "insee_com"])
+    return df.dropna(subset=["code_station", "code_polluant", "insee_com"])
 
 
 def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable[dict]:
@@ -112,7 +111,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: Optional[b
                 mode_flag = first_upload
                 first_upload = False
                 # submit upload and continue fetching
-                fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures", mode_flag)
+                fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
                 upload_futures.append(fut)
                 total += len(df)
             buffer = []
@@ -122,7 +121,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: Optional[b
     if df is not None and not df.empty:
         mode_flag = first_upload
         first_upload = False
-        fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures", mode_flag)
+        fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
         upload_futures.append(fut)
         total += len(df)
 
@@ -207,7 +206,7 @@ def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8,
 
         df = _nettoyer(collected)
         if df is not None and not df.empty:
-            charger_dataframe_vers_bigquery(df, "fait_mesures", mode_ecrasement=first_upload)
+            charger_dataframe_vers_bigquery(df, "fait_mesures_heure", mode_ecrasement=first_upload)
             first_upload = False
 
     logging.info("Backfill range complete: %d days processed", processed)

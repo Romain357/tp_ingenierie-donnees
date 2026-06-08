@@ -11,8 +11,7 @@ def transformer_stations():
     df_stations = df[["code", "nom", "typologie_com_airpl"]].drop_duplicates()
     df_stations = df_stations.rename(columns={
         "code": "code_station",
-        "nom": "nom_station",
-        "typologie_com_airpl": "influence"
+        "typologie_com_airpl": "nature_station"
     })
     df_stations = df_stations.dropna(subset=["code_station"])
 

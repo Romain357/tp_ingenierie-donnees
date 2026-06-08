@@ -3,14 +3,56 @@ from google.cloud import bigquery
 import pandas as pd
 
 
+TABLE_SCHEMAS = {
+    "communes": [
+        bigquery.SchemaField("insee_com", "INTEGER"),
+        bigquery.SchemaField("nom_com", "STRING"),
+        bigquery.SchemaField("code_dept", "STRING"),
+    ],
+    "stations": [
+        bigquery.SchemaField("code_station", "STRING"),
+        bigquery.SchemaField("nom", "STRING"),
+        bigquery.SchemaField("nature_station", "STRING"),
+    ],
+    "polluants": [
+        bigquery.SchemaField("code_polluant", "STRING"),
+        bigquery.SchemaField("notation", "STRING"),
+        bigquery.SchemaField("unite", "STRING"),
+    ],
+    "fait_mesures_heure": [
+        bigquery.SchemaField("id", "STRING"),
+        bigquery.SchemaField("date_mesure", "DATETIME"),
+        bigquery.SchemaField("valeur", "FLOAT"),
+        bigquery.SchemaField("code_station", "STRING"),
+        bigquery.SchemaField("code_polluant", "STRING"),
+        bigquery.SchemaField("insee_com", "INTEGER"),
+    ],
+}
+
+
 def _sanitize_for_bigquery(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     # Ensure numeric measurement column is float
     if "valeur" in df.columns:
         df["valeur"] = pd.to_numeric(df["valeur"], errors="coerce").astype(float)
 
+    # String columns from the target BigQuery schema
+    for col in (
+        "id",
+        "code_station",
+        "code_polluant",
+        "nom",
+        "nom_com",
+        "nature_station",
+        "notation",
+        "unite",
+        "code_dept",
+    ):
+        if col in df.columns:
+            df[col] = df[col].astype("string")
+
     # Common integer columns - use pandas nullable integer to preserve NA
-    for col in ("id", "insee_com", "id_poll_ue"):
+    for col in ("insee_com",):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
@@ -62,6 +104,8 @@ def charger_dataframe_vers_bigquery(df, nom_table, mode_ecrasement=True, nettoya
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_TRUNCATE" if mode_ecrasement else "WRITE_APPEND",
     )
+    if nom_table in TABLE_SCHEMAS:
+        job_config.schema = TABLE_SCHEMAS[nom_table]
 
     job = client.load_table_from_dataframe(df_to_load, table_id, job_config=job_config)
     job.result()
