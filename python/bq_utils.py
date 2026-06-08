@@ -9,8 +9,11 @@ def _sanitize_for_bigquery(df: pd.DataFrame) -> pd.DataFrame:
     if "valeur" in df.columns:
         df["valeur"] = pd.to_numeric(df["valeur"], errors="coerce").astype(float)
 
+    if "id" in df.columns:
+        df["id"] = df["id"].astype("string")
+
     # Common integer columns - use pandas nullable integer to preserve NA
-    for col in ("id", "insee_com", "id_poll_ue"):
+    for col in ("insee_com", "id_poll_ue"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
