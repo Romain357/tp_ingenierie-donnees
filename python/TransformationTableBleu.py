@@ -37,6 +37,11 @@ def transformer_polluants():
     )
 
     df_polluants["code_poll"] = df_polluants["code_poll"].astype(int)
+    charger_dataframe_vers_bigquery(
+    df_polluants,
+    "polluants",
+    mode_ecrasement=True
+)
 
 
 if __name__ == "__main__":

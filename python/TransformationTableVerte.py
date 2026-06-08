@@ -107,33 +107,36 @@ def creer_agregats():
             SELECT
                 ROW_NUMBER() OVER (
                     ORDER BY
-                        DATETIME(DATE(date_mesure)),
+                        date_jour,
                         code_station,
                         code_polluant,
                         insee_com
                 ) AS id,
-
-                DATETIME(DATE(date_mesure)) AS date_jour,
-                AVG(CAST(valeur AS FLOAT64)) AS valeur,
-                CAST(code_station AS STRING) AS code_station,
-                CAST(code_polluant AS STRING) AS code_polluant,
-                CAST(insee_com AS STRING) AS insee_com
-
-            FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
-
-            WHERE code_station IS NOT NULL
-              AND code_polluant IS NOT NULL
-              AND insee_com IS NOT NULL
-              AND valeur IS NOT NULL
-              AND date_mesure IS NOT NULL
-              AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
-
-            GROUP BY
                 date_jour,
+                valeur,
                 code_station,
                 code_polluant,
                 insee_com
-            ;
+            FROM (
+                SELECT
+                    DATETIME(DATE(date_mesure)) AS date_jour,
+                    AVG(CAST(valeur AS FLOAT64)) AS valeur,
+                    CAST(code_station AS STRING) AS code_station,
+                    CAST(code_polluant AS STRING) AS code_polluant,
+                    CAST(insee_com AS STRING) AS insee_com
+                FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
+                WHERE code_station IS NOT NULL
+                AND code_polluant IS NOT NULL
+                AND insee_com IS NOT NULL
+                AND valeur IS NOT NULL
+                AND date_mesure IS NOT NULL
+                AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
+                GROUP BY
+                    date_jour,
+                    code_station,
+                    code_polluant,
+                    insee_com
+            );
             """,
         ),
         (
@@ -143,33 +146,36 @@ def creer_agregats():
             SELECT
                 ROW_NUMBER() OVER (
                     ORDER BY
-                        DATETIME(DATE_TRUNC(DATE(date_mesure), MONTH)),
+                        date_mois,
                         code_station,
                         code_polluant,
                         insee_com
                 ) AS id,
-
-                DATETIME(DATE_TRUNC(DATE(date_mesure), MONTH)) AS date_mois,
-                AVG(CAST(valeur AS FLOAT64)) AS valeur,
-                CAST(code_station AS STRING) AS code_station,
-                CAST(code_polluant AS STRING) AS code_polluant,
-                CAST(insee_com AS STRING) AS insee_com
-
-            FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
-
-            WHERE code_station IS NOT NULL
-              AND code_polluant IS NOT NULL
-              AND insee_com IS NOT NULL
-              AND valeur IS NOT NULL
-              AND date_mesure IS NOT NULL
-              AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
-
-            GROUP BY
                 date_mois,
+                valeur,
                 code_station,
                 code_polluant,
                 insee_com
-            ;
+            FROM (
+                SELECT
+                    DATETIME(DATE_TRUNC(DATE(date_mesure), MONTH)) AS date_mois,
+                    AVG(CAST(valeur AS FLOAT64)) AS valeur,
+                    CAST(code_station AS STRING) AS code_station,
+                    CAST(code_polluant AS STRING) AS code_polluant,
+                    CAST(insee_com AS STRING) AS insee_com
+                FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
+                WHERE code_station IS NOT NULL
+                AND code_polluant IS NOT NULL
+                AND insee_com IS NOT NULL
+                AND valeur IS NOT NULL
+                AND date_mesure IS NOT NULL
+                AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
+                GROUP BY
+                    date_mois,
+                    code_station,
+                    code_polluant,
+                    insee_com
+            );
             """,
         ),
     ]

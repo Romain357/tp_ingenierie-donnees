@@ -17,7 +17,7 @@ def transformer_communes():
     })
 
     print(f"{len(df_communes)} communes récupérées")
-    charger_dataframe_vers_bigquery(df_communes, "dim_communes", mode_ecrasement=True)
+    charger_dataframe_vers_bigquery(df_communes,"communes", mode_ecrasement=True)
 
 
 if __name__ == "__main__":
