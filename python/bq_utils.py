@@ -35,6 +35,8 @@ def _convert_column_for_bigquery(df: pd.DataFrame, col: str, field_type: str) ->
 
     if field_type == "STRING":
         df[col] = df[col].astype("string")
+        if col in ("code_polluant", "insee_com"):
+            df[col] = df[col].str.strip().str.replace(r"\.0$", "", regex=True)
     elif field_type in ("INTEGER", "INT64"):
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
     elif field_type in ("FLOAT", "FLOAT64"):

@@ -67,7 +67,9 @@ def transformer_mesures():
         df_mesures["code_polluant"].isin(polluants_autorises)
     ].copy()
 
-    df_mesures["code_polluant"] = df_mesures["code_polluant"].astype(str)
+    df_mesures["code_polluant"] = (
+        df_mesures["code_polluant"].astype("Int64").astype("string")
+    )
 
     df_mesures = df_mesures.drop(columns=["validite"])
 
@@ -122,7 +124,7 @@ def creer_agregats():
                     DATETIME(DATE(date_mesure)) AS date_jour,
                     AVG(CAST(valeur AS FLOAT64)) AS valeur,
                     CAST(code_station AS STRING) AS code_station,
-                    CAST(code_polluant AS STRING) AS code_polluant,
+                    REGEXP_REPLACE(TRIM(CAST(code_polluant AS STRING)), r'\\.0$', '') AS code_polluant,
                     CAST(insee_com AS STRING) AS insee_com
                 FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
                 WHERE code_station IS NOT NULL
@@ -130,7 +132,7 @@ def creer_agregats():
                 AND insee_com IS NOT NULL
                 AND valeur IS NOT NULL
                 AND date_mesure IS NOT NULL
-                AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
+                AND REGEXP_REPLACE(TRIM(CAST(code_polluant AS STRING)), r'\\.0$', '') IN ('1', '3', '8', '24', '39')
                 GROUP BY
                     date_jour,
                     code_station,
@@ -161,7 +163,7 @@ def creer_agregats():
                     DATETIME(DATE_TRUNC(DATE(date_mesure), MONTH)) AS date_mois,
                     AVG(CAST(valeur AS FLOAT64)) AS valeur,
                     CAST(code_station AS STRING) AS code_station,
-                    CAST(code_polluant AS STRING) AS code_polluant,
+                    REGEXP_REPLACE(TRIM(CAST(code_polluant AS STRING)), r'\\.0$', '') AS code_polluant,
                     CAST(insee_com AS STRING) AS insee_com
                 FROM `tp-donnees-gp1.pollution_data.fait_mesures_heure`
                 WHERE code_station IS NOT NULL
@@ -169,7 +171,7 @@ def creer_agregats():
                 AND insee_com IS NOT NULL
                 AND valeur IS NOT NULL
                 AND date_mesure IS NOT NULL
-                AND SAFE_CAST(code_polluant AS INT64) IN (1, 3, 8, 24, 39)
+                AND REGEXP_REPLACE(TRIM(CAST(code_polluant AS STRING)), r'\\.0$', '') IN ('1', '3', '8', '24', '39')
                 GROUP BY
                     date_mois,
                     code_station,
