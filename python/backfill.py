@@ -24,6 +24,7 @@ from bq_utils import charger_dataframe_vers_bigquery
 
 
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
+POLLUANTS_AUTORISES = {1, 3, 8, 24, 39}
 
 
 def _est_valide(mesure: dict) -> bool:
@@ -51,6 +52,12 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
         "code_commune": "insee_com",
         "date_heure_tu": "date_mesure",
     })
+    # Filtrer uniquement les polluants autorisés et normaliser le format
+    if "code_polluant" in df.columns:
+        df["code_polluant"] = pd.to_numeric(df["code_polluant"], errors="coerce")
+        df = df[df["code_polluant"].isin(POLLUANTS_AUTORISES)].copy()
+        # stocker comme string propre pour BigQuery
+        df["code_polluant"] = df["code_polluant"].astype("Int64").astype("string")
     return df.dropna(subset=["code_station", "code_polluant", "insee_com"])
 
 
