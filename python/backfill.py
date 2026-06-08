@@ -26,6 +26,7 @@ from bq_utils import charger_dataframe_vers_bigquery
 
 URL_MESURES_HORAIRES = "https://data.airpl.org/api/v1/mesure/horaire/"
 POLLUANTS_AUTORISES = {1, 3, 8, 24, 39}
+DEPARTEMENTS_CIBLES = {44, 49, 53, 72, 85}
 
 
 def _est_valide(mesure: dict) -> bool:
@@ -53,6 +54,11 @@ def _create_session(retries: int = 6, backoff_factor: float = 1.0, pool_size: in
 @lru_cache(maxsize=1)
 def _polluants_query_string() -> str:
     return ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES))
+
+
+@lru_cache(maxsize=1)
+def _departements_query_string() -> str:
+    return ",".join(str(x) for x in sorted(DEPARTEMENTS_CIBLES))
 
 
 def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
@@ -88,6 +94,7 @@ def _fetch_day_window(pool_size: int, day: str, start_iso: str, end_iso: str) ->
         "date_heure_tu__lte": end_iso,
         "code_polluant__in": _polluants_query_string(),
         "validite": "true",
+        "code_configuration_de_mesure__code_point_de_prelevement__code_station__code_commune__code_departement__in": _departements_query_string(),
     }
     results: List[dict] = []
     page = 1
