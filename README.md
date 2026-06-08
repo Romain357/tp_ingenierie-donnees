@@ -77,7 +77,7 @@ Schémas attendus :
 ```bash
 bq mk --table \
   pollution_data.communes \
-  insee_com:INTEGER,nom_com:STRING,code_dept:STRING
+  insee_com:STRING,nom_com:STRING,code_dept:STRING
 
 bq mk --table \
   pollution_data.stations \
@@ -89,7 +89,7 @@ bq mk --table \
 
 bq mk --table \
   pollution_data.fait_mesures_heure \
-  id:STRING,date_mesure:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:INTEGER
+  id:STRING,date_mesure:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
 
 bq mk --table \
   pollution_data.agregat_jour \
