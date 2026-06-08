@@ -4,7 +4,7 @@ Improvements over the original version:
 - CLI with `--since` or `--start/--end` modes
 - HTTP session with retries and backoff
 - Optional parallel per-day fetching or single-pass pagination until a cutoff date
-- Batch upload to BigQuery with local CSV backup
+- Batch upload to BigQuery
 """
 
 from __future__ import annotations
@@ -86,7 +86,7 @@ def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable
         page += 1
 
 
-def backfill_since(since_str: str, batch_size: int = 10000, save_csv: Optional[bool] = None, upload_workers: int = 4, http_pool_size: int = 25):
+def backfill_since(since_str: str, batch_size: int = 10000, upload_workers: int = 4, http_pool_size: int = 25):
     """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
 
     This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
@@ -133,18 +133,6 @@ def backfill_since(since_str: str, batch_size: int = 10000, save_csv: Optional[b
             logging.exception("Upload task failed")
 
     upload_executor.shutdown(wait=True)
-
-    # optional local save if requested or when running in dry-run style
-    if save_csv or (save_csv is None and total > 0):
-        out = f"/tmp/data/backfill_since_{since_str.replace(':', '-')}.csv"
-        pd.concat([df]) if df is not None else None
-        try:
-            all_df = _nettoyer(buffer) if buffer else df
-            if all_df is not None and not all_df.empty:
-                all_df.to_csv(out, index=False, encoding="utf-8")
-                logging.info("Saved local backup to %s", out)
-        except Exception:
-            logging.debug("Failed to write local backup", exc_info=True)
 
     logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
 
@@ -224,7 +212,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=8, help="Max threads for range mode")
     p.add_argument("--upload-workers", type=int, default=4, help="Number of parallel upload workers")
     p.add_argument("--http-pool-size", type=int, default=25, help="HTTP connection pool size per session")
-    p.add_argument("--save-csv", action="store_true", help="Save a local CSV backup of the final batch")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -238,7 +225,7 @@ def main(argv=None):
         if not since and args.start:
             since = args.start
         logging.info("Running backfill since %s", since)
-        backfill_since(since, batch_size=args.batch_size, save_csv=args.save_csv, upload_workers=args.upload_workers, http_pool_size=args.http_pool_size)
+        backfill_since(since, batch_size=args.batch_size, upload_workers=args.upload_workers, http_pool_size=args.http_pool_size)
     else:
         logging.info("Running backfill range %s -> %s", args.start, args.end)
         backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch, http_pool_size=args.http_pool_size)
