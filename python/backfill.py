@@ -65,76 +65,92 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     return df.dropna(subset=["code_station", "code_polluant", "insee_com"])
 
 
-def _iter_pages_until(session: requests.Session, since_dt: datetime) -> Iterable[dict]:
-    """Iterate over API pages (newest -> older) and yield result dicts until reaching since_dt."""
+def _fetch_day_window(session: requests.Session, day: str, start_iso: str, end_iso: str) -> tuple[str, List[dict]]:
     url = URL_MESURES_HORAIRES
-    params = {"format": "json", "limit": 1000, "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES))}
+    params = {
+        "format": "json",
+        "limit": 1000,
+        "date_heure_tu__gte": start_iso,
+        "date_heure_tu__lte": end_iso,
+        "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES)),
+        "validite": "true",
+    }
+    results: List[dict] = []
     page = 1
     while url:
-        logging.debug("Fetching page %s: %s", page, url)
-        resp = session.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", [])
-        if not results:
+        try:
+            resp = session.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            page_results = data.get("results", [])
+            results.extend(ligne for ligne in page_results if _est_valide(ligne))
+            url = data.get("next")
+            params = None
+            page += 1
+        except Exception:
+            logging.exception("Error fetching day %s", day)
             break
-        for ligne in results:
-            date_str = ligne.get("date_heure_tu")
-            if not date_str:
-                continue
-            try:
-                dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
-            except ValueError:
-                continue
-            if dt >= since_dt:
-                if _est_valide(ligne):
-                    yield ligne
-            else:
-                logging.info("Reached older data at page %s (date=%s)", page, date_str)
-                return
-        url = data.get("next")
-        params = None
-        page += 1
+    return day, results
 
 
-def backfill_since(since_str: str, batch_size: int = 10000, upload_workers: int = 4, http_pool_size: int = 25):
-    """Backfill all records newer than `since_str` (ISO UTC) using API pagination.
+def backfill_since(
+    since_str: str,
+    batch_size: int = 10000,
+    max_workers: int = 8,
+    days_per_batch: int = 32,
+    upload_workers: int = 4,
+    http_pool_size: int = 25,
+):
+    """Backfill all records newer than `since_str` (ISO UTC) using daily API windows.
 
-    This mirrors the notebook strategy: walk through API pages and stop when encountering older records.
+    This mirrors the notebook strategy but pushes date, validity and pollutant filters into the API requests.
     """
     since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
     session = _create_session(pool_size=http_pool_size)
 
-    buffer: List[dict] = []
-    first_upload = True
-    total = 0
+    start_date = since_dt.date()
+    end_date = date.today()
+
+    jours = []
+    cur = start_date
+    while cur <= end_date:
+        jours.append(cur.isoformat())
+        cur += timedelta(days=1)
+
+    total = len(jours)
+    logging.info("Backfill since %s (%d days)", since_dt.isoformat(), total)
+
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # executor for uploads
     upload_executor = ThreadPoolExecutor(max_workers=upload_workers)
     upload_futures = []
+    processed = 0
+    first_upload = True
 
-    for ligne in _iter_pages_until(session, since_dt):
-        buffer.append(ligne)
-        if len(buffer) >= batch_size:
-            df = _nettoyer(buffer)
-            if df is not None and not df.empty:
+    for i in range(0, total, days_per_batch):
+        batch = jours[i : i + days_per_batch]
+        collected: List[dict] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for day in batch:
+                day_start = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if day == start_date.isoformat() else f"{day}T00:00:00Z"
+                day_end = f"{day}T23:59:59Z"
+                futures[ex.submit(_fetch_day_window, session, day, day_start, day_end)] = day
+
+            for fut in as_completed(futures):
+                day, lines = fut.result()
+                processed += 1
+                logging.info("[%d/%d] %s -> %d lignes", processed, total, day, len(lines))
+                collected.extend(lines)
+
+        df = _nettoyer(collected)
+        if df is not None and not df.empty:
+            for offset in range(0, len(df), batch_size):
+                chunk = df.iloc[offset : offset + batch_size].copy()
                 mode_flag = first_upload
                 first_upload = False
-                # submit upload and continue fetching
-                fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
+                fut = upload_executor.submit(charger_dataframe_vers_bigquery, chunk, "fait_mesures_heure", mode_flag)
                 upload_futures.append(fut)
-                total += len(df)
-            buffer = []
-
-    # final flush
-    df = _nettoyer(buffer)
-    if df is not None and not df.empty:
-        mode_flag = first_upload
-        first_upload = False
-        fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
-        upload_futures.append(fut)
-        total += len(df)
 
     # wait for uploads to finish
     for fut in upload_futures:
@@ -145,7 +161,7 @@ def backfill_since(since_str: str, batch_size: int = 10000, upload_workers: int 
 
     upload_executor.shutdown(wait=True)
 
-    logging.info("Backfill since %s complete (%d rows uploaded)", since_str, total)
+    logging.info("Backfill since %s complete (%d days processed)", since_str, processed)
 
 
 def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8, days_per_batch: int = 32, http_pool_size: int = 25):
@@ -237,7 +253,14 @@ def main(argv=None):
         if not since and args.start:
             since = args.start
         logging.info("Running backfill since %s", since)
-        backfill_since(since, batch_size=args.batch_size, upload_workers=args.upload_workers, http_pool_size=args.http_pool_size)
+        backfill_since(
+            since,
+            batch_size=args.batch_size,
+            max_workers=args.max_workers,
+            days_per_batch=args.days_per_batch,
+            upload_workers=args.upload_workers,
+            http_pool_size=args.http_pool_size,
+        )
     else:
         logging.info("Running backfill range %s -> %s", args.start, args.end)
         backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch, http_pool_size=args.http_pool_size)
