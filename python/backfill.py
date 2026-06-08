@@ -66,7 +66,7 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     if not lignes:
         return None
     df = pd.DataFrame(lignes)
-    cols = ["id", "code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu"]
+    cols = ["id", "code_station", "code_polluant", "code_commune", "valeur", "date_heure_tu", "validite"]
     df = df[[c for c in cols if c in df.columns]].copy()
     df = df.rename(columns={
         "code_commune": "insee_com",
@@ -151,25 +151,56 @@ def _iter_since_pages(
     max_offset_guard: int,
 ) -> Iterable[dict]:
     url = URL_MESURES_HORAIRES
-    params = {
+    base_params = {
         "format": "json",
         "limit": 5000,
-        "date_heure_tu__gte": since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "date_heure_tu__range": f"{since_dt.date().isoformat()},{date.today().isoformat()}",
         "code_polluant__in": _polluants_query_string(),
         "validite": "true",
         "code_configuration_de_mesure__code_point_de_prelevement__code_station__code_commune__code_departement__in": _departements_query_string(),
     }
+    candidates = [
+        base_params,
+        {k: v for k, v in base_params.items() if not k.startswith("code_configuration_de_mesure__")},
+        {
+            k: v
+            for k, v in base_params.items()
+            if not k.startswith("code_configuration_de_mesure__") and k != "validite"
+        },
+    ]
+    params = None
+
+    # Probe first page with progressively relaxed filters if the API returns no data.
+    for idx, candidate in enumerate(candidates, start=1):
+        resp = session.get(url, params=candidate, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        first_results = data.get("results", [])
+        if first_results:
+            params = None
+            break
+        logging.warning("Since-mode probe returned 0 rows with candidate #%d", idx)
+    else:
+        logging.warning("Since-mode probe returned no data for all filter candidates")
+        return
 
     page = 1
-    while url:
+    while True:
         if page > max_pages:
             logging.warning("Stopping since-mode scan: reached max pages=%d", max_pages)
             break
 
-        resp = session.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results", [])
+        # For page 1, reuse the probe response; for next pages, request the `next` URL.
+        if page == 1:
+            results = data.get("results", [])
+        else:
+            if not url:
+                break
+            resp = session.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("results", [])
+
         if not results:
             break
 
