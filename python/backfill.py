@@ -144,6 +144,69 @@ def _fetch_day_window(
     return day, results
 
 
+def _iter_since_pages(
+    session: requests.Session,
+    since_dt: datetime,
+    max_pages: int,
+    max_offset_guard: int,
+) -> Iterable[dict]:
+    url = URL_MESURES_HORAIRES
+    params = {
+        "format": "json",
+        "limit": 5000,
+        "date_heure_tu__gte": since_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "code_polluant__in": _polluants_query_string(),
+        "validite": "true",
+        "code_configuration_de_mesure__code_point_de_prelevement__code_station__code_commune__code_departement__in": _departements_query_string(),
+    }
+
+    page = 1
+    while url:
+        if page > max_pages:
+            logging.warning("Stopping since-mode scan: reached max pages=%d", max_pages)
+            break
+
+        resp = session.get(url, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        results = data.get("results", [])
+        if not results:
+            break
+
+        oldest_dt = None
+        for ligne in results:
+            date_str = ligne.get("date_heure_tu")
+            if not date_str:
+                continue
+            try:
+                dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
+            except ValueError:
+                continue
+
+            if oldest_dt is None or dt < oldest_dt:
+                oldest_dt = dt
+
+            if dt >= since_dt and _est_valide(ligne):
+                yield ligne
+
+        if oldest_dt is not None and oldest_dt < since_dt:
+            logging.info("Reached cutoff date at page %d (oldest=%s)", page, oldest_dt.isoformat())
+            break
+
+        url = data.get("next")
+        next_offset = _offset_from_next(url)
+        if next_offset > max_offset_guard:
+            logging.warning(
+                "Stopping since-mode scan: next offset %d exceeds guard %d",
+                next_offset,
+                max_offset_guard,
+            )
+            break
+
+        params = None
+        page += 1
+
+
 def backfill_since(
     since_str: str,
     batch_size: int = 10000,
@@ -154,64 +217,52 @@ def backfill_since(
     max_pages_per_day: int = 200,
     max_offset_guard: int = 300000,
 ):
-    """Backfill all records newer than `since_str` (ISO UTC) using daily API windows.
+    """Backfill all records newer than `since_str` (ISO UTC) with a single paginated scan.
 
-    This mirrors the notebook strategy but pushes date, validity and pollutant filters into the API requests.
+    Using one descending scan avoids restarting from offset 0 for each day.
     """
     since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
-    start_date = since_dt.date()
-    end_date = date.today()
-    effective_max_workers = min(max_workers, 12)
     effective_upload_workers = min(upload_workers, 8)
-    effective_days_per_batch = min(days_per_batch, effective_max_workers)
-    if effective_max_workers != max_workers:
-        logging.info("Capping max-workers from %d to %d to reduce API contention", max_workers, effective_max_workers)
+    session = _create_session(pool_size=http_pool_size)
+
+    if max_workers != 8 or days_per_batch != 32:
+        logging.info("Since-mode now uses single-pass scan; --max-workers and --days-per-batch are ignored")
     if effective_upload_workers != upload_workers:
         logging.info("Capping upload-workers from %d to %d to avoid oversaturating BigQuery uploads", upload_workers, effective_upload_workers)
-    if effective_days_per_batch != days_per_batch:
-        logging.info("Capping days-per-batch from %d to %d to keep progress visible and avoid long waits", days_per_batch, effective_days_per_batch)
-
-    jours = []
-    cur = start_date
-    while cur <= end_date:
-        jours.append(cur.isoformat())
-        cur += timedelta(days=1)
-
-    total = len(jours)
-    logging.info("Backfill since %s (%d days)", since_dt.isoformat(), total)
+    logging.info("Backfill since %s (single-pass)", since_dt.isoformat())
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     upload_executor = ThreadPoolExecutor(max_workers=effective_upload_workers)
     upload_futures = []
-    processed = 0
     first_upload = True
+    total_rows = 0
+    buffer: List[dict] = []
 
-    for i in range(0, total, effective_days_per_batch):
-        batch = jours[i : i + effective_days_per_batch]
-        collected: List[dict] = []
-        with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
-            futures = {}
-            for day in batch:
-                day_start = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if day == start_date.isoformat() else f"{day}T00:00:00Z"
-                day_end = f"{day}T23:59:59Z"
-                logging.info("Submitting day %s", day)
-                futures[ex.submit(_fetch_day_window, http_pool_size, day, day_start, day_end, max_pages_per_day, max_offset_guard)] = day
+    for ligne in _iter_since_pages(session, since_dt, max_pages=max_pages_per_day * 50, max_offset_guard=max_offset_guard * 20):
+        buffer.append(ligne)
+        if len(buffer) < batch_size:
+            continue
 
-            for fut in as_completed(futures):
-                day, lines = fut.result()
-                processed += 1
-                logging.info("[%d/%d] %s -> %d lignes", processed, total, day, len(lines))
-                collected.extend(lines)
-
-        df = _nettoyer(collected)
+        df = _nettoyer(buffer)
         if df is not None and not df.empty:
-            for offset in range(0, len(df), batch_size):
-                chunk = df.iloc[offset : offset + batch_size].copy()
-                mode_flag = first_upload
-                first_upload = False
-                fut = upload_executor.submit(charger_dataframe_vers_bigquery, chunk, "fait_mesures_heure", mode_flag)
-                upload_futures.append(fut)
+            mode_flag = first_upload
+            first_upload = False
+            fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
+            upload_futures.append(fut)
+            total_rows += len(df)
+            logging.info("Queued upload batch: %d rows (total queued=%d)", len(df), total_rows)
+        buffer = []
+
+    # flush tail
+    df = _nettoyer(buffer)
+    if df is not None and not df.empty:
+        mode_flag = first_upload
+        first_upload = False
+        fut = upload_executor.submit(charger_dataframe_vers_bigquery, df, "fait_mesures_heure", mode_flag)
+        upload_futures.append(fut)
+        total_rows += len(df)
+        logging.info("Queued final upload batch: %d rows (total queued=%d)", len(df), total_rows)
 
     # wait for uploads to finish
     for fut in upload_futures:
@@ -222,7 +273,7 @@ def backfill_since(
 
     upload_executor.shutdown(wait=True)
 
-    logging.info("Backfill since %s complete (%d days processed)", since_str, processed)
+    logging.info("Backfill since %s complete (%d rows queued for upload)", since_str, total_rows)
 
 
 def backfill_range(
