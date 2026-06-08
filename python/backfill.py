@@ -262,13 +262,35 @@ def backfill_since(
         logging.info("Capping upload-workers from %d to %d to avoid oversaturating BigQuery uploads", upload_workers, effective_upload_workers)
     logging.info("Backfill since %s (single-pass)", since_dt.isoformat())
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 
     upload_executor = ThreadPoolExecutor(max_workers=effective_upload_workers)
     upload_futures = []
     first_upload = True
     total_rows = 0
     buffer: List[dict] = []
+    max_inflight_uploads = max(2, effective_upload_workers * 2)
+
+    def _drain_uploads(blocking: bool = False) -> None:
+        nonlocal upload_futures
+        if not upload_futures:
+            return
+        if blocking:
+            for fut in upload_futures:
+                try:
+                    fut.result()
+                except Exception:
+                    logging.exception("Upload task failed")
+            upload_futures = []
+            return
+
+        done, pending = wait(upload_futures, timeout=0, return_when=FIRST_COMPLETED)
+        for fut in done:
+            try:
+                fut.result()
+            except Exception:
+                logging.exception("Upload task failed")
+        upload_futures = list(pending)
 
     for ligne in _iter_since_pages(session, since_dt, max_pages=max_pages_per_day * 50, max_offset_guard=max_offset_guard * 20):
         buffer.append(ligne)
@@ -283,6 +305,9 @@ def backfill_since(
             upload_futures.append(fut)
             total_rows += len(df)
             logging.info("Queued upload batch: %d rows (total queued=%d)", len(df), total_rows)
+            if len(upload_futures) >= max_inflight_uploads:
+                logging.info("Upload backlog reached %d futures; waiting for one to finish", len(upload_futures))
+                _drain_uploads(blocking=False)
         buffer = []
 
     # flush tail
@@ -296,11 +321,7 @@ def backfill_since(
         logging.info("Queued final upload batch: %d rows (total queued=%d)", len(df), total_rows)
 
     # wait for uploads to finish
-    for fut in upload_futures:
-        try:
-            fut.result()
-        except Exception:
-            logging.exception("Upload task failed")
+    _drain_uploads(blocking=True)
 
     upload_executor.shutdown(wait=True)
 
