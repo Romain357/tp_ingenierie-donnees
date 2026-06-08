@@ -13,6 +13,7 @@ import argparse
 import logging
 import sys
 from datetime import datetime, date, timedelta
+from functools import lru_cache
 from typing import Iterable, List, Optional
 
 import pandas as pd
@@ -32,14 +33,26 @@ def _est_valide(mesure: dict) -> bool:
     return valeur is True or str(valeur).strip().lower() == "true"
 
 
-def _create_session(retries: int = 3, backoff_factor: float = 0.5, pool_size: int = 25) -> requests.Session:
+def _create_session(retries: int = 6, backoff_factor: float = 1.0, pool_size: int = 25) -> requests.Session:
     s = requests.Session()
-    retry = Retry(total=retries, backoff_factor=backoff_factor, status_forcelist=(429, 500, 502, 503, 504))
-    # tune connection pool for concurrent workers
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_size, pool_maxsize=pool_size)
+    retry = Retry(
+        total=retries,
+        connect=retries,
+        read=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=(429, 500, 502, 503, 504),
+        respect_retry_after_header=True,
+    )
+    # tune connection pool for concurrent workers and block when the pool is exhausted
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool_size, pool_maxsize=pool_size, pool_block=True)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
+
+
+@lru_cache(maxsize=1)
+def _polluants_query_string() -> str:
+    return ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES))
 
 
 def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
@@ -65,14 +78,15 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     return df.dropna(subset=["code_station", "code_polluant", "insee_com"])
 
 
-def _fetch_day_window(session: requests.Session, day: str, start_iso: str, end_iso: str) -> tuple[str, List[dict]]:
+def _fetch_day_window(pool_size: int, day: str, start_iso: str, end_iso: str) -> tuple[str, List[dict]]:
+    session = _create_session(pool_size=pool_size)
     url = URL_MESURES_HORAIRES
     params = {
         "format": "json",
         "limit": 1000,
         "date_heure_tu__gte": start_iso,
         "date_heure_tu__lte": end_iso,
-        "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES)),
+        "code_polluant__in": _polluants_query_string(),
         "validite": "true",
     }
     results: List[dict] = []
@@ -106,10 +120,14 @@ def backfill_since(
     This mirrors the notebook strategy but pushes date, validity and pollutant filters into the API requests.
     """
     since_dt = datetime.strptime(since_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=None)
-    session = _create_session(pool_size=http_pool_size)
-
     start_date = since_dt.date()
     end_date = date.today()
+    effective_max_workers = min(max_workers, 12)
+    effective_upload_workers = min(upload_workers, 8)
+    if effective_max_workers != max_workers:
+        logging.info("Capping max-workers from %d to %d to reduce API contention", max_workers, effective_max_workers)
+    if effective_upload_workers != upload_workers:
+        logging.info("Capping upload-workers from %d to %d to avoid oversaturating BigQuery uploads", upload_workers, effective_upload_workers)
 
     jours = []
     cur = start_date
@@ -122,7 +140,7 @@ def backfill_since(
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    upload_executor = ThreadPoolExecutor(max_workers=upload_workers)
+    upload_executor = ThreadPoolExecutor(max_workers=effective_upload_workers)
     upload_futures = []
     processed = 0
     first_upload = True
@@ -130,12 +148,12 @@ def backfill_since(
     for i in range(0, total, days_per_batch):
         batch = jours[i : i + days_per_batch]
         collected: List[dict] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
             futures = {}
             for day in batch:
                 day_start = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if day == start_date.isoformat() else f"{day}T00:00:00Z"
                 day_end = f"{day}T23:59:59Z"
-                futures[ex.submit(_fetch_day_window, session, day, day_start, day_end)] = day
+                futures[ex.submit(_fetch_day_window, http_pool_size, day, day_start, day_end)] = day
 
             for fut in as_completed(futures):
                 day, lines = fut.result()
@@ -179,41 +197,27 @@ def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8,
 
     total = len(jours)
     logging.info("Backfill range %s -> %s (%d days)", start_date, end_date, total)
+    effective_max_workers = min(max_workers, 12)
+    if effective_max_workers != max_workers:
+        logging.info("Capping max-workers from %d to %d to reduce API contention", max_workers, effective_max_workers)
 
-    def _fetch_day(session: requests.Session, date_j: str):
-        url = URL_MESURES_HORAIRES
-        params = {
-            "format": "json",
-            "limit": 1000,
-            "date_heure_tu__gte": f"{date_j}T00:00:00Z",
-            "date_heure_tu__lte": f"{date_j}T23:59:59Z",
-            "code_polluant__in": ",".join(str(x) for x in sorted(POLLUANTS_AUTORISES)),
-        }
-        results = []
-        page = 1
-        while url:
-            try:
-                resp = session.get(url, params=params, timeout=30)
-                resp.raise_for_status()
-                data = resp.json()
-                results.extend(ligne for ligne in data.get("results", []) if _est_valide(ligne))
-                url = data.get("next")
-                params = None
-                page += 1
-            except Exception:
-                logging.exception("Error fetching day %s", date_j)
-                break
-        return date_j, results
-
-    session = _create_session(pool_size=http_pool_size)
     processed = 0
     first_upload = True
 
     for i in range(0, total, days_per_batch):
         batch = jours[i : i + days_per_batch]
         collected: List[dict] = []
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(_fetch_day, session, d): d for d in batch}
+        with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
+            futures = {
+                ex.submit(
+                    _fetch_day_window,
+                    http_pool_size,
+                    d,
+                    f"{d}T00:00:00Z",
+                    f"{d}T23:59:59Z",
+                ): d
+                for d in batch
+            }
             for fut in as_completed(futures):
                 day, lines = fut.result()
                 processed += 1
