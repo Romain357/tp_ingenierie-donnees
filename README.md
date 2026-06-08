@@ -41,10 +41,10 @@ Liens utiles projet :
   - `python/extractpolluant.py`
   - `python/extraction.py` (mesures horaires)
 - Transformation / chargement BigQuery :
-  - `python/TransformationTableJaune.py` → `dim_communes`
-  - `python/TransformationTableBleu.py` → `dim_polluants`
-  - `python/TransformationTableOrange.py` → `dim_stations`
-  - `python/TransformationTableVerte.py` → `fait_mesures`
+  - `python/TransformationTableJaune.py` → `communes`
+  - `python/TransformationTableBleu.py` → `polluants`
+  - `python/TransformationTableOrange.py` → `stations`
+  - `python/TransformationTableVerte.py` → `fait_mesures_heure`, `agregat_jour`, `agregat_mois`
 - `python/bq_utils.py` : utilitaire de chargement DataFrame vers BigQuery.
 - `Dockerfile` : exécution conteneurisée.
 
@@ -65,40 +65,42 @@ Projet BigQuery utilisé dans le code : `tp-donnees-gp1`
 Dataset : `pollution_data`
 
 Tables alimentées automatiquement par le pipeline :
-- `dim_communes`
-- `dim_polluants`
-- `dim_stations`
-- `fait_mesures`
+- `communes`
+- `polluants`
+- `stations`
+- `fait_mesures_heure`
+- `agregat_jour`
+- `agregat_mois`
 
-Tables créées manuellement en complément (commandes fournies) :
+Schémas attendus :
 
 ```bash
 bq mk --table \
-  pollution_data.dim_temps \
-  id_temps:TIMESTAMP,annee:INTEGER,mois:INTEGER,jour:INTEGER,heure:INTEGER
-
-bq mk --table \
-  pollution_data.dim_communes \
+  pollution_data.communes \
   insee_com:INTEGER,nom_com:STRING,code_dept:STRING
 
 bq mk --table \
-  pollution_data.dim_polluants \
-  code_poll:INTEGER,notation:STRING,nom_poll:STRING,unite:STRING,id_poll_ue:INTEGER
+  pollution_data.stations \
+  code_station:STRING,nom:STRING,nature_station:STRING
 
 bq mk --table \
-  pollution_data.fait_mesures \
-  id_mesure:INTEGER,code_station:STRING,id_poll_ue:INTEGER,insee_com:INTEGER,date_mesure:TIMESTAMP,valeur:FLOAT,validite:BOOLEAN
+  pollution_data.polluants \
+  code_polluant:STRING,notation:STRING,unite:STRING
 
 bq mk --table \
-  pollution_data.fait_mesures_jour \
-  id_mesure:INTEGER,code_station:STRING,id_poll_ue:INTEGER,insee_com:INTEGER,date_mesure:TIMESTAMP,valeur:FLOAT,validite:BOOLEAN
+  pollution_data.fait_mesures_heure \
+  id:STRING,date_mesure:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:INTEGER
 
 bq mk --table \
-  pollution_data.fait_mesures_mois \
-  id_mesure:INTEGER,code_station:STRING,id_poll_ue:INTEGER,insee_com:INTEGER,date_mesure:TIMESTAMP,valeur:FLOAT,validite:BOOLEAN
+  pollution_data.agregat_jour \
+  id:INTEGER,date_jour:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
+
+bq mk --table \
+  pollution_data.agregat_mois \
+  id:INTEGER,date_mois:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
 ```
 
-> Remarque : `dim_polluants` est aussi chargée par le pipeline, les schémas doivent rester cohérents.
+> Remarque : les noms et types ci-dessus correspondent au schéma cible du projet.
 
 ## 5) Prérequis
 
@@ -127,8 +129,8 @@ python python/main.py
 
 ### Modes de chargement des mesures (`ETL_MODE`)
 
-- `INCREMENTAL` (par défaut) : suppression préalable des lignes de la date ciblée, puis insert dans `fait_mesures`
-- `FULL` : écrase `fait_mesures`
+- `INCREMENTAL` (par défaut) : suppression préalable des lignes de la date ciblée, puis insert dans `fait_mesures_heure`
+- `FULL` : écrase `fait_mesures_heure`
 
 Exemple :
 
