@@ -14,6 +14,7 @@ import logging
 import sys
 from datetime import datetime, date, timedelta
 from functools import lru_cache
+from urllib.parse import parse_qs, urlparse
 from typing import Iterable, List, Optional
 
 import pandas as pd
@@ -84,7 +85,25 @@ def _nettoyer(lignes: List[dict]) -> Optional[pd.DataFrame]:
     return df.dropna(subset=["code_station", "code_polluant", "insee_com"])
 
 
-def _fetch_day_window(pool_size: int, day: str, start_iso: str, end_iso: str) -> tuple[str, List[dict]]:
+def _offset_from_next(next_url: Optional[str]) -> int:
+    if not next_url:
+        return 0
+    try:
+        query = parse_qs(urlparse(next_url).query)
+        raw = query.get("offset", ["0"])[0]
+        return int(raw)
+    except Exception:
+        return 0
+
+
+def _fetch_day_window(
+    pool_size: int,
+    day: str,
+    start_iso: str,
+    end_iso: str,
+    max_pages_per_day: int,
+    max_offset_guard: int,
+) -> tuple[str, List[dict]]:
     session = _create_session(pool_size=pool_size)
     url = URL_MESURES_HORAIRES
     params = {
@@ -99,12 +118,24 @@ def _fetch_day_window(pool_size: int, day: str, start_iso: str, end_iso: str) ->
     page = 1
     while url:
         try:
+            if page > max_pages_per_day:
+                logging.warning("Stopping day %s: reached max_pages_per_day=%d", day, max_pages_per_day)
+                break
             resp = session.get(url, params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
             page_results = data.get("results", [])
             results.extend(ligne for ligne in page_results if _est_valide(ligne))
             url = data.get("next")
+            next_offset = _offset_from_next(url)
+            if next_offset > max_offset_guard:
+                logging.warning(
+                    "Stopping day %s: next offset %d exceeds guard %d (filters likely too broad)",
+                    day,
+                    next_offset,
+                    max_offset_guard,
+                )
+                break
             params = None
             page += 1
         except Exception:
@@ -120,6 +151,8 @@ def backfill_since(
     days_per_batch: int = 32,
     upload_workers: int = 4,
     http_pool_size: int = 25,
+    max_pages_per_day: int = 200,
+    max_offset_guard: int = 300000,
 ):
     """Backfill all records newer than `since_str` (ISO UTC) using daily API windows.
 
@@ -130,10 +163,13 @@ def backfill_since(
     end_date = date.today()
     effective_max_workers = min(max_workers, 12)
     effective_upload_workers = min(upload_workers, 8)
+    effective_days_per_batch = min(days_per_batch, effective_max_workers)
     if effective_max_workers != max_workers:
         logging.info("Capping max-workers from %d to %d to reduce API contention", max_workers, effective_max_workers)
     if effective_upload_workers != upload_workers:
         logging.info("Capping upload-workers from %d to %d to avoid oversaturating BigQuery uploads", upload_workers, effective_upload_workers)
+    if effective_days_per_batch != days_per_batch:
+        logging.info("Capping days-per-batch from %d to %d to keep progress visible and avoid long waits", days_per_batch, effective_days_per_batch)
 
     jours = []
     cur = start_date
@@ -151,8 +187,8 @@ def backfill_since(
     processed = 0
     first_upload = True
 
-    for i in range(0, total, days_per_batch):
-        batch = jours[i : i + days_per_batch]
+    for i in range(0, total, effective_days_per_batch):
+        batch = jours[i : i + effective_days_per_batch]
         collected: List[dict] = []
         with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
             futures = {}
@@ -160,7 +196,7 @@ def backfill_since(
                 day_start = since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if day == start_date.isoformat() else f"{day}T00:00:00Z"
                 day_end = f"{day}T23:59:59Z"
                 logging.info("Submitting day %s", day)
-                futures[ex.submit(_fetch_day_window, http_pool_size, day, day_start, day_end)] = day
+                futures[ex.submit(_fetch_day_window, http_pool_size, day, day_start, day_end, max_pages_per_day, max_offset_guard)] = day
 
             for fut in as_completed(futures):
                 day, lines = fut.result()
@@ -189,7 +225,15 @@ def backfill_since(
     logging.info("Backfill since %s complete (%d days processed)", since_str, processed)
 
 
-def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8, days_per_batch: int = 32, http_pool_size: int = 25):
+def backfill_range(
+    start_str: str,
+    end_str: Optional[str],
+    max_workers: int = 8,
+    days_per_batch: int = 32,
+    http_pool_size: int = 25,
+    max_pages_per_day: int = 200,
+    max_offset_guard: int = 300000,
+):
     """Backfill by fetching each day in parallel (range mode)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -211,8 +255,9 @@ def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8,
     processed = 0
     first_upload = True
 
-    for i in range(0, total, days_per_batch):
-        batch = jours[i : i + days_per_batch]
+    effective_days_per_batch = min(days_per_batch, effective_max_workers)
+    for i in range(0, total, effective_days_per_batch):
+        batch = jours[i : i + effective_days_per_batch]
         collected: List[dict] = []
         with ThreadPoolExecutor(max_workers=effective_max_workers) as ex:
             futures = {
@@ -222,6 +267,8 @@ def backfill_range(start_str: str, end_str: Optional[str], max_workers: int = 8,
                     d,
                     f"{d}T00:00:00Z",
                     f"{d}T23:59:59Z",
+                    max_pages_per_day,
+                    max_offset_guard,
                 ): d
                 for d in batch
             }
@@ -251,6 +298,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--max-workers", type=int, default=8, help="Max threads for range mode")
     p.add_argument("--upload-workers", type=int, default=4, help="Number of parallel upload workers")
     p.add_argument("--http-pool-size", type=int, default=25, help="HTTP connection pool size per session")
+    p.add_argument("--max-pages-per-day", type=int, default=200, help="Safety cap on API pages fetched per day")
+    p.add_argument("--max-offset-guard", type=int, default=300000, help="Safety guard: stop a day if next offset exceeds this value")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -271,10 +320,20 @@ def main(argv=None):
             days_per_batch=args.days_per_batch,
             upload_workers=args.upload_workers,
             http_pool_size=args.http_pool_size,
+            max_pages_per_day=args.max_pages_per_day,
+            max_offset_guard=args.max_offset_guard,
         )
     else:
         logging.info("Running backfill range %s -> %s", args.start, args.end)
-        backfill_range(args.start, args.end, max_workers=args.max_workers, days_per_batch=args.days_per_batch, http_pool_size=args.http_pool_size)
+        backfill_range(
+            args.start,
+            args.end,
+            max_workers=args.max_workers,
+            days_per_batch=args.days_per_batch,
+            http_pool_size=args.http_pool_size,
+            max_pages_per_day=args.max_pages_per_day,
+            max_offset_guard=args.max_offset_guard,
+        )
 
 
 if __name__ == "__main__":
