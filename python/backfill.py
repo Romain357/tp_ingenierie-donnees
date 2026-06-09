@@ -240,7 +240,7 @@ def _iter_since_pages(
 
 def backfill_since(
     since_str: str,
-    batch_size: int = 10000,
+    batch_size: int = 100000,
     max_workers: int = 8,
     days_per_batch: int = 32,
     upload_workers: int = 4,
@@ -396,10 +396,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     group.add_argument("--start", help="Start datetime for range mode (inclusive), ISO UTC")
     p.add_argument("--end", help="End datetime for range mode (inclusive), ISO UTC")
     p.add_argument("--mode", choices=("since", "range"), default="since")
-    p.add_argument("--batch-size", type=int, default=10000, help="Number of rows per upload batch for since mode")
+    p.add_argument("--batch-size", type=int, default=100000, help="Number of rows per upload batch for since mode")
     p.add_argument("--days-per-batch", type=int, default=32, help="Number of days to process per parallel batch in range mode")
     p.add_argument("--max-workers", type=int, default=8, help="Max threads for range mode")
-    p.add_argument("--upload-workers", type=int, default=4, help="Number of parallel upload workers")
+    p.add_argument("--upload-workers", type=int, default=1, help="Number of parallel upload workers")
     p.add_argument("--http-pool-size", type=int, default=25, help="HTTP connection pool size per session")
     p.add_argument("--max-pages-per-day", type=int, default=200, help="Safety cap on API pages fetched per day")
     p.add_argument("--max-offset-guard", type=int, default=300000, help="Safety guard: stop a day if next offset exceeds this value")
