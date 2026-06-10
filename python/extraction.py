@@ -15,6 +15,7 @@ def _est_valide(mesure: dict) -> bool:
 
 def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
     url = URL_MESURES_HORAIRES
+
     params = {
         "format": "json",
         "limit": 1000,
@@ -33,9 +34,16 @@ def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
         data = response.json()
 
         results = data.get("results", [])
+        print(f"Page {page}: {len(results)} résultats")
+
+        if results:
+            print("Premier:", results[0].get("date_heure_tu"))
+            print("Dernier :", results[-1].get("date_heure_tu"))
 
         if not results:
             break
+
+        print(f"       {len(results)} lignes reçues")
 
         for mesure in results:
             date_mesure = mesure.get("date_heure_tu")
@@ -43,14 +51,18 @@ def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
                 continue
 
             try:
-                dt_mesure = datetime.strptime(date_mesure, "%Y-%m-%dT%H:%M:%SZ").date()
+                dt_mesure = datetime.strptime(
+                    date_mesure,
+                    "%Y-%m-%dT%H:%M:%SZ"
+                ).date()
             except ValueError:
                 continue
 
             if dt_mesure == date_cible:
                 if _est_valide(mesure):
                     all_results.append(mesure)
-            elif dt_mesure < date_cible:
+
+            elif dt_mesure < date_cible and all_results:
                 return pd.DataFrame(all_results)
 
         url = data.get("next")
@@ -58,7 +70,6 @@ def extraire_mesures_jour(date_jour: str) -> pd.DataFrame:
         page += 1
 
     return pd.DataFrame(all_results)
-
 
 def extraire_mesures():
 
