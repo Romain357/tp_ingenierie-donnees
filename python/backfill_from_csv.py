@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from google.cloud import bigquery
+from bq_utils import charger_dataframe_vers_bigquery
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -128,20 +128,9 @@ def extraire_dates(df: pd.DataFrame) -> set[str]:
 
 # ── Upload vers BigQuery ───────────────────────────────────────────────────────
 
-def envoyer_vers_bigquery(df: pd.DataFrame, client: bigquery.Client) -> None:
-    """Charge `df` dans BigQuery en mode APPEND."""
-    job_config = bigquery.LoadJobConfig(
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-        autodetect=False,
-        schema=SCHEMA_BQ,
-    )
-    job = client.load_table_from_dataframe(df, TABLE_REF, job_config=job_config)
-    job.result()  # attend la fin du job BQ
-    logging.info(
-        "Upload terminé : %d lignes envoyées vers %s",
-        len(df),
-        TABLE_REF,
-    )
+def envoyer_vers_bigquery(df: pd.DataFrame) -> None:
+    charger_dataframe_vers_bigquery(df, "fait_mesures_heure", mode_ecrasement=False)
+    logging.info("Upload terminé : %d lignes envoyées vers fait_mesures_heure", len(df))
 
 
 # ── Logique principale ─────────────────────────────────────────────────────────
