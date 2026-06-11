@@ -2,14 +2,12 @@
 backfill_from_csv.py
 --------------------
 Prend en entrée un ou plusieurs fichiers CSV de mesures AirPL transformées,
-extrait les dates distinctes présentes dans chaque fichier, vérifie dans
-BigQuery si ces journées sont déjà présentes, et n'envoie les données que
-pour les journées absentes.
+extrait les dates distinctes, vérifie dans BigQuery si ces journées sont déjà
+présentes, et n'envoie les données que pour les journées absentes.
 
 Usage :
     python backfill_from_csv.py fichier1.csv fichier2.csv
-    python backfill_from_csv.py mesures_airpl_transformees_2026-06-10.csv
-    python backfill_from_csv.py *.csv               # via glob shell
+    python backfill_from_csv.py *.csv
     python backfill_from_csv.py fichier.csv --dry-run
 """
 
@@ -22,60 +20,54 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from google.cloud import bigquery
+
 from bq_utils import charger_dataframe_vers_bigquery
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Configuration (alignée sur bq_utils.py) ───────────────────────────────────
 
-PROJECT_ID = "votre-projet-gcp"   # ← à adapter
-DATASET_ID = "votre_dataset"      # ← à adapter
+PROJECT_ID = "tp-donnees-gp1"
+DATASET_ID = "pollution_data"
 TABLE_ID   = "fait_mesures_heure"
 TABLE_REF  = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
-DATE_COL   = "date_mesure"        # colonne datetime dans le CSV
+DATE_COL   = "date_mesure"
 
-# Colonnes attendues dans le CSV
 CSV_COLUMNS = ["id", "code_station", "code_polluant", "insee_com", "valeur", DATE_COL]
-
-# Schéma BigQuery
-SCHEMA_BQ = [
-    bigquery.SchemaField("id",            "STRING"),
-    bigquery.SchemaField("code_station",  "STRING"),
-    bigquery.SchemaField("code_polluant", "STRING"),
-    bigquery.SchemaField("insee_com",     "STRING"),
-    bigquery.SchemaField("valeur",        "FLOAT64"),
-    bigquery.SchemaField("date_mesure",   "TIMESTAMP"),
-]
-
-# ── BigQuery : client ──────────────────────────────────────────────────────────
-
-def _get_bq_client() -> bigquery.Client:
-    """Retourne un client BigQuery (utilise ADC ou GOOGLE_APPLICATION_CREDENTIALS)."""
-    return bigquery.Client(project=PROJECT_ID)
 
 
 # ── BigQuery : vérification des journées déjà présentes ───────────────────────
 
-def dates_deja_en_base(dates: set[str], client: bigquery.Client) -> set[str]:
+def dates_deja_en_base(dates: set[str]) -> set[str]:
     """
     Interroge BigQuery pour savoir quelles journées (YYYY-MM-DD) parmi
     `dates` ont déjà au moins une ligne dans la table.
-
-    Retourne l'ensemble des dates PRÉSENTES en base.
+    Réutilise le même projet/client que bq_utils.
     """
     if not dates:
         return set()
 
-    dates_sql = ", ".join(f"DATE('{d}')" for d in sorted(dates))
+    client = bigquery.Client(project=PROJECT_ID)
+
+    # Paramètre typé DATE pour éviter l'injection SQL
+    dates_as_date = [
+        pd.Timestamp(d).date() for d in sorted(dates)
+    ]
 
     query = f"""
-        SELECT DISTINCT DATE(TIMESTAMP(`{DATE_COL}`)) AS jour
+        SELECT DISTINCT DATE({DATE_COL}) AS jour
         FROM `{TABLE_REF}`
-        WHERE DATE(TIMESTAMP(`{DATE_COL}`)) IN ({dates_sql})
+        WHERE DATE({DATE_COL}) IN UNNEST(@dates_cibles)
     """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("dates_cibles", "DATE", dates_as_date)
+        ]
+    )
 
     logging.info("Vérification en base pour : %s", sorted(dates))
     try:
-        result = client.query(query).result()
+        result = client.query(query, job_config=job_config).result()
         presentes = {str(row["jour"]) for row in result}
         logging.info("Dates déjà présentes en base : %s", presentes or "aucune")
         return presentes
@@ -100,37 +92,13 @@ def charger_csv(chemin: Path) -> pd.DataFrame:
             f"Colonnes présentes : {list(df.columns)}"
         )
 
-    df = df[CSV_COLUMNS].copy()
-
-    # date_mesure → datetime UTC naïf (BigQuery TIMESTAMP attend sans tz)
-    df[DATE_COL] = (
-        pd.to_datetime(df[DATE_COL], utc=True)
-        .dt.tz_localize(None)
-    )
-
-    # valeur → float
-    df["valeur"] = pd.to_numeric(df["valeur"], errors="coerce")
-
-    # code_polluant → string propre (entier sans décimale)
-    df["code_polluant"] = (
-        pd.to_numeric(df["code_polluant"], errors="coerce")
-        .astype("Int64")
-        .astype("string")
-    )
-
-    return df.dropna(subset=["code_station", "code_polluant", "insee_com", DATE_COL])
+    return df[CSV_COLUMNS].copy()
 
 
 def extraire_dates(df: pd.DataFrame) -> set[str]:
     """Retourne l'ensemble des journées YYYY-MM-DD présentes dans le DataFrame."""
-    return set(df[DATE_COL].dt.date.astype(str).unique())
-
-
-# ── Upload vers BigQuery ───────────────────────────────────────────────────────
-
-def envoyer_vers_bigquery(df: pd.DataFrame) -> None:
-    charger_dataframe_vers_bigquery(df, "fait_mesures_heure", mode_ecrasement=False)
-    logging.info("Upload terminé : %d lignes envoyées vers fait_mesures_heure", len(df))
+    dates = pd.to_datetime(df[DATE_COL], errors="coerce", utc=True)
+    return set(dates.dt.date.astype(str).dropna().unique())
 
 
 # ── Logique principale ─────────────────────────────────────────────────────────
@@ -142,7 +110,6 @@ def traiter_fichiers(chemins: list[Path], dry_run: bool = False) -> None:
     2. Une seule requête BQ pour vérifier les dates déjà présentes
     3. Envoie en une seule fois toutes les lignes des dates absentes
     """
-    client = _get_bq_client()
 
     # ── Étape 1 : lecture ────────────────────────────────────────────────────
     frames_par_date: dict[str, list[pd.DataFrame]] = {}
@@ -162,7 +129,8 @@ def traiter_fichiers(chemins: list[Path], dry_run: bool = False) -> None:
         )
 
         for date_str in dates_fichier:
-            mask = df[DATE_COL].dt.date.astype(str) == date_str
+            dates_parsed = pd.to_datetime(df[DATE_COL], errors="coerce", utc=True)
+            mask = dates_parsed.dt.date.astype(str) == date_str
             frames_par_date.setdefault(date_str, []).append(df[mask].copy())
 
     if not frames_par_date:
@@ -173,7 +141,7 @@ def traiter_fichiers(chemins: list[Path], dry_run: bool = False) -> None:
     logging.info("Dates candidates au backfill : %s", sorted(toutes_dates))
 
     # ── Étape 2 : vérification BigQuery ─────────────────────────────────────
-    dates_presentes = dates_deja_en_base(toutes_dates, client)
+    dates_presentes = dates_deja_en_base(toutes_dates)
     dates_a_envoyer = toutes_dates - dates_presentes
 
     if dates_presentes:
@@ -196,11 +164,12 @@ def traiter_fichiers(chemins: list[Path], dry_run: bool = False) -> None:
     )
 
     if dry_run:
-        logging.info("[DRY-RUN] Aucune écriture en base. Aperçu des données :")
+        logging.info("[DRY-RUN] Aucune écriture en base. Aperçu :")
         print(df_final.to_string(max_rows=20))
         return
 
-    envoyer_vers_bigquery(df_final, client)
+    # Utilise charger_dataframe_vers_bigquery de bq_utils (mode APPEND)
+    charger_dataframe_vers_bigquery(df_final, TABLE_ID, mode_ecrasement=False)
     logging.info("🎉 Backfill terminé avec succès.")
 
 
@@ -246,8 +215,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         stream=sys.stdout,
     )
 
-    chemins_valides = [p for p in args.fichiers if p.exists()
-                       or logging.error("Fichier introuvable : %s", p) or False]
+    chemins_valides = []
+    for p in args.fichiers:
+        if not p.exists():
+            logging.error("Fichier introuvable : %s", p)
+        else:
+            chemins_valides.append(p)
 
     if not chemins_valides:
         logging.error("Aucun fichier valide fourni. Abandon.")
