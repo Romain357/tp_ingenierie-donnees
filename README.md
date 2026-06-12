@@ -68,36 +68,6 @@ Tables alimentées automatiquement par le pipeline :
 - `agregat_jour`
 - `agregat_mois`
 
-Schémas attendus :
-
-```bash
-bq mk --table \
-  pollution_data.communes \
-  insee_com:STRING,nom_com:STRING,code_dept:STRING
-
-bq mk --table \
-  pollution_data.stations \
-  code_station:STRING,nom:STRING,nature_station:STRING
-
-bq mk --table \
-  pollution_data.polluants \
-  code_polluant:STRING,notation:STRING,unite:STRING
-
-bq mk --table \
-  pollution_data.fait_mesures_heure \
-  id:STRING,date_mesure:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
-
-bq mk --table \
-  pollution_data.agregat_jour \
-  id:INTEGER,date_jour:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
-
-bq mk --table \
-  pollution_data.agregat_mois \
-  id:INTEGER,date_mois:DATETIME,valeur:FLOAT,code_station:STRING,code_polluant:STRING,insee_com:STRING
-```
-
-> Remarque : les noms et types ci-dessus correspondent au schéma cible du projet.
-
 ## 5) Prérequis
 
 - Python 3.10+
@@ -165,19 +135,14 @@ docker build -t airnaoned-etl .
 docker run --rm airnaoned-etl
 ```
 
-## 11) Notebook de tests
-
-Un notebook de test est disponible à la racine du projet : `tests_pipeline.ipynb`.
-Il charge les modules depuis `python/` et sert de point d’entrée interactif pour vérifier les imports et exécuter le pipeline manuellement.
-
-## 12) Limites et pistes d’amélioration
+## 11) Limites et pistes d’amélioration
 
 - Ajouter des tests automatisés (unitaires + intégration)
 - Rendre les paramètres (projet GCP, dataset, date de traitement) configurables
 - Industrialiser l’ordonnancement (Cloud Composer / cron / Cloud Run Jobs)
 - Implémenter les calculs IQA et la logique d’alerte directement dans le pipeline
 
-## 13) Contact projet (cours)
+## 12) Contact projet (cours)
 
 **Jérémy KLAUER** — Tech Lead Data  
 BPCE Solutions Informatiques  
