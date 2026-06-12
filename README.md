@@ -48,10 +48,6 @@ Liens utiles projet :
 - `python/bq_utils.py` : utilitaire de chargement DataFrame vers BigQuery.
 - `Dockerfile` : exécution conteneurisée.
 
-### Versions Notebook
-
-- `python/backfill.ipynb` : version notebook du backfill massif.
-- Les autres scripts Python disposent aussi de leur miroir notebook dans `python/` pour les tests et l'exploration.
 
 ### Flux de traitement
 
